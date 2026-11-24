@@ -5,4 +5,4 @@ inspired by https://nandgame.com/
 vibe coded with Claude using the following prompt:
 I want to write a game that teaches plc ladder logic programming. the game starts with a hands on tutorial showing the different types of controls and devices you need to start building the ladder logic for a traffic light. lights, timers, switches. The second round is to build a red light that turns on and off. Third is to add the green light. Then the yellow light, then the cross street lights, the cross walk lights, and finally dealing with the emergency strobe/interrupt for fire and ambulance crossings. Maybe include left turn lanes on the main street with ground loops to detect when cars are there.
 
-
+Download and run Rung-by-rung.html to play

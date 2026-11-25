@@ -1,9 +1,5 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Rung by Rung</title>
+<meta name="claude:viewport-fit-sides" content="cover">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <style>
@@ -168,6 +164,26 @@ details ul { margin: 8px 0 0; padding-left: 18px; color: var(--ink2); }
 .sol { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--ink2); font-size: 12.5px; }
 .legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 6px 14px; margin-bottom: 12px; font-size: 12px; color: var(--ink2); }
 .legend div { display: flex; gap: 8px; align-items: center; }
+.outs { display: flex; flex-direction: column; flex: none; }
+.outs.multi { border-left: 2px solid var(--line); }
+.orow { display: flex; align-items: flex-start; height: 68px; }
+.concept { margin: 12px 0; border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--surface2); }
+.concept small { display: block; font: 700 11px/1 var(--f-head); letter-spacing: .1em; text-transform: uppercase; color: var(--power-ink); margin-bottom: 6px; }
+.concept h4 { font: 700 18px/1.2 var(--f-head); margin: 0 0 6px; }
+.concept p { margin: 0 0 8px; max-width: 65ch; }
+.concept.recap { background: transparent; }
+.formula { display: inline-block; font: 500 13px/1.4 var(--f-mono); background: var(--power-bg); color: var(--power-ink); border-radius: 5px; padding: 3px 8px; margin-bottom: 8px; max-width: 100%; overflow-wrap: anywhere; }
+.mini { display: grid; gap: 6px; overflow-x: auto; pointer-events: none; }
+.mini .rungWrap { background: var(--bg); }
+.mini .cell:hover { background: none; }
+.learned .lc { border-top: 1px solid var(--line); padding: 10px 0 2px; margin-top: 10px; }
+.learned .lc p { margin: 6px 0 0; color: var(--ink2); }
+.learned .lc .formula { margin: 4px 0 6px; display: block; }
+.newparts { margin-top: 12px; border: 1px solid var(--power); background: var(--power-bg); border-radius: 8px; padding: 9px 12px; }
+.newparts small { display: block; font: 700 11px/1 var(--f-head); letter-spacing: .1em; text-transform: uppercase; color: var(--power-ink); margin-bottom: 4px; }
+.newparts ul { margin: 0; padding-left: 18px; }
+.legend .isnew { color: var(--ink); }
+.legend .isnew svg { color: var(--power); }
 .legend svg { width: 34px; height: 24px; flex: none; color: var(--ink); }
 .legend svg * { stroke: currentColor; fill: none; stroke-width: 2.2; stroke-linecap: round; }
 .legend svg text { fill: currentColor; stroke: none; font: 700 9px var(--f-mono); }
@@ -178,8 +194,6 @@ details ul { margin: 8px 0 0; padding-left: 18px; color: var(--ink2); }
 }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
 </style>
-</head>
-<body>
 <div id="app">
 <div class="wrap">
   <header class="top">
@@ -225,17 +239,27 @@ details ul { margin: 8px 0 0; padding-left: 18px; color: var(--ink2); }
 /* ---------- Ladder engine: scan-cycle simulator ---------- */
 const TICK = 0.1; // seconds per PLC scan
 const clone = o => JSON.parse(JSON.stringify(o));
-const emptyRung = () => ({ rows: [[]], tail: [], out: null });
+const emptyRung = () => ({ rows: [[]], tail: [], out: null, more: [] });   // out = main output, more = extra output branches
+const allOuts = r => [r.out].concat(r.more || []).filter(Boolean);
 
 function readTag(s, tag) {
   if (tag && tag.endsWith('.DN')) { const t = s.timers[tag.slice(0, -3)]; return !!(t && t.dn); }
   return !!s.tags[tag];
 }
-function evalEl(s, el) { if (!el.tag) return false; const v = readTag(s, el.tag); return el.t === 'NC' ? !v : v; }
+function evalEl(s, el) {
+  if (!el.tag) return false;
+  if (el.t === 'LES' || el.t === 'GEQ' || el.t === 'LIM') {          // compare a timer's running value (.ACC, in tenths of a second)
+    const t = s.timers[el.tag], a = t ? t.acc : 0;
+    return el.t === 'LES' ? a < el.val : el.t === 'GEQ' ? a >= el.val : (a >= el.lo && a < el.hi);
+  }
+  const v = readTag(s, el.tag); return el.t === 'NC' ? !v : v;
+}
 function makeSim(prog) { return { prog, tags: {}, timers: {}, tick: 0, info: [] }; }
 
 function scan(s) {
   const info = [];
+  s.tags.CLK_1HZ = (s.tick % 10) < 5;   // system clock bits: 0.5 s on / 0.5 s off
+  s.tags.CLK_FAST = (s.tick % 4) < 2;   // 0.2 s on / 0.2 s off
   s.prog.rungs.forEach(r => {
     const ri = { rows: [], tail: [], gOut: true, power: false };
     let any = false, g = false;
@@ -250,15 +274,18 @@ function scan(s) {
     let p = g;
     r.tail.forEach(el => { const c = evalEl(s, el); ri.tail.push({ inP: p, pass: p && c }); p = p && c; });
     ri.power = p;
-    const o = r.out;
-    if (o && o.tag) {
+    allOuts(r).forEach(o => {
+    if (o.tag) {
       if (o.t === 'COIL') s.tags[o.tag] = p;
+      else if (o.t === 'OTL') { if (p) s.tags[o.tag] = true; }
+      else if (o.t === 'OTU') { if (p) s.tags[o.tag] = false; }
       else if (o.t === 'TON') {
         const t = s.timers[o.tag] || (s.timers[o.tag] = { acc: 0, dn: false, pre: 0 });
         t.pre = o.preset;
         if (p) { if (t.acc < o.preset) t.acc++; t.dn = t.acc >= o.preset; } else { t.acc = 0; t.dn = false; }
       }
     }
+    });
     info.push(ri);
   });
   s.info = info; s.tick++;
@@ -323,119 +350,170 @@ function blinks(tag, t0, t1, min, label) {
 }
 function gradeLevel(prog, level) {
   TAGNAME = {}; level.outputs.concat(level.inputs, level.bitsInfo || []).forEach(o => TAGNAME[o.tag] = o.label || o.tag);
-  return level.scenarios.map(sc => {
+  const out = level.scenarios.map(sc => {
     const tr = runScenario(prog, sc);
     const checks = sc.checks.map(c => { const r = c.run(tr); return Object.assign({ label: c.label }, r, r.ok ? {} : { hint: c.hint }); });
     return { name: sc.name, desc: sc.desc, checks, ok: checks.every(c => c.ok) };
   });
+  if (level.structure) { const checks = level.structure.map(s => { const ok = !!s.test(prog.rungs); return { label: s.label, ok, msg: ok ? '' : s.why, hint: ok ? undefined : s.hint }; }); out.push({ name: 'Build check', desc: 'Looks at how the ladder is built, not just what the lamps do.', checks, ok: checks.every(c => c.ok) }); }
+  return out;
 }
 /* ---------- Level definitions ---------- */
 const NO = t => ({ t: 'NO', tag: t }), NC = t => ({ t: 'NC', tag: t });
-const COIL = t => ({ t: 'COIL', tag: t });
+const COIL = t => ({ t: 'COIL', tag: t }), OTL = t => ({ t: 'OTL', tag: t }), OTU = t => ({ t: 'OTU', tag: t });
 const TON = (t, s) => ({ t: 'TON', tag: t, preset: Math.round(s * 10) });
+const LES = (t, s) => ({ t: 'LES', tag: t, val: Math.round(s * 10) });
+const GEQ = (t, s) => ({ t: 'GEQ', tag: t, val: Math.round(s * 10) });
+const LIM = (t, a, b) => ({ t: 'LIM', tag: t, lo: Math.round(a * 10), hi: Math.round(b * 10) });
 const RG = (rows, out, tail) => ({ rows, tail: tail || [], out });
+const RGM = (rows, outs, tail) => ({ rows, tail: tail || [], out: outs[0], more: outs.slice(1) });   // one rung, several outputs
 
 const I = {
   START: { tag: 'START', label: 'START button', kind: 'push' },
+  START_B: { tag: 'START_B', label: 'Second START button', kind: 'push' },
+  KEY: { tag: 'KEY', label: 'Key switch', kind: 'toggle' },
   STOP: { tag: 'STOP', label: 'STOP button', kind: 'push' },
   RUN: { tag: 'RUN', label: 'RUN switch', kind: 'toggle' },
   PED_BTN: { tag: 'PED_BTN', label: 'Pedestrian button', kind: 'push' },
-  EMG: { tag: 'EMG', label: 'Emergency preempt', kind: 'toggle' },
-  LOOP_EB: { tag: 'LOOP_EB', label: 'Loop: eastbound left lane', kind: 'toggle' },
-  LOOP_WB: { tag: 'LOOP_WB', label: 'Loop: westbound left lane', kind: 'toggle' }
+  EMG: { tag: 'EMG', label: 'Emergency vehicle on Main St', kind: 'toggle' }
 };
 const O = {
   M_R: { tag: 'M_R', label: 'Main red', color: 'red' }, M_Y: { tag: 'M_Y', label: 'Main yellow', color: 'yellow' }, M_G: { tag: 'M_G', label: 'Main green', color: 'green' },
   C_R: { tag: 'C_R', label: 'Cross red', color: 'red' }, C_Y: { tag: 'C_Y', label: 'Cross yellow', color: 'yellow' }, C_G: { tag: 'C_G', label: 'Cross green', color: 'green' },
   WALK: { tag: 'WALK', label: 'WALK sign', color: 'white' }, DONT: { tag: 'DONT', label: 'DON’T WALK sign', color: 'red' },
   STROBE: { tag: 'STROBE', label: 'Emergency strobe', color: 'blue' },
-  ARROW_G: { tag: 'ARROW_G', label: 'Left arrow green', color: 'green' }, ARROW_Y: { tag: 'ARROW_Y', label: 'Left arrow yellow', color: 'yellow' }
+  ARROW_R: { tag: 'ARROW_R', label: 'Left arrow red', color: 'red' }, ARROW_Y: { tag: 'ARROW_Y', label: 'Left arrow yellow', color: 'yellow' }, ARROW_G: { tag: 'ARROW_G', label: 'Left arrow green', color: 'green' }
 };
 const BITS = {
   PED_REQ: { tag: 'PED_REQ', label: 'Ped request (memory)' },
-  RESTART: { tag: 'RESTART', label: 'Cycle restart (memory)' },
-  LT_CALL: { tag: 'LT_CALL', label: 'Left-turn call (memory)' }
+  PREEMPT: { tag: 'PREEMPT', label: 'Preempt hold (memory)' }
+};
+const CLOCKS = {
+  CLK_1HZ: { tag: 'CLK_1HZ', label: 'System clock 1 Hz (0.5 s on, 0.5 s off)' },
+  CLK_FAST: { tag: 'CLK_FAST', label: 'System clock fast (0.2 s on, 0.2 s off)' }
 };
 
-/* Reference solutions, built up round by round. */
+/* Reference solutions. Each round builds on the last. One cycle timer (T1) runs the whole sequence,
+   and compare contacts (LES / GEQ / LIM) read its running value, as a real cycle clock would. */
 const SOL = {};
 SOL.t1 = [RG([[NO('START')]], COIL('LAMP'))];
-SOL.t2 = [RG([[NO('START')], [NO('LAMP')]], COIL('LAMP'), [NC('STOP')])];
-SOL.t3 = [RG([[NO('RUN')]], TON('T1', 3)), RG([[NO('T1.DN')]], COIL('BEACON'))];
-SOL.r2 = [RG([[NC('T2.DN')]], TON('T1', 2)), RG([[NC('T2.DN')]], TON('T2', 4)), RG([[NC('T1.DN')]], COIL('M_R'))];
-SOL.r3 = [RG([[NC('T2.DN')]], TON('T1', 6)), RG([[NC('T2.DN')]], TON('T2', 10)),
-  RG([[NC('T1.DN')]], COIL('M_G')), RG([[NO('T1.DN')]], COIL('M_R'))];
-SOL.r4 = [RG([[NC('T3.DN')]], TON('T1', 6)), RG([[NC('T3.DN')]], TON('T2', 8)), RG([[NC('T3.DN')]], TON('T3', 12)),
-  RG([[NC('T1.DN')]], COIL('M_G')), RG([[NO('T1.DN'), NC('T2.DN')]], COIL('M_Y')), RG([[NO('T2.DN')]], COIL('M_R'))];
-const cycTimers = en => [8, 10, 11, 17, 19, 20].map((s, i) => RG([en], TON('T' + (i + 1), s)));
-SOL.r5 = cycTimers([NC('T6.DN')]).concat([
-  RG([[NC('T1.DN')]], COIL('M_G')), RG([[NO('T1.DN'), NC('T2.DN')]], COIL('M_Y')), RG([[NO('T2.DN')]], COIL('M_R')),
-  RG([[NO('T3.DN'), NC('T4.DN')]], COIL('C_G')), RG([[NO('T4.DN'), NC('T5.DN')]], COIL('C_Y')),
-  RG([[NC('T3.DN')], [NO('T5.DN')]], COIL('C_R'))]);
+SOL.t2 = [RG([[NC('START')]], COIL('LAMP'))];
+SOL.t3 = [RG([[NO('START'), NO('KEY')]], COIL('LAMP'))];
+SOL.t4 = [RG([[NO('START')], [NO('START_B')]], COIL('LAMP'))];
+SOL.t5 = [RG([[NO('START')], [NO('LAMP')]], COIL('LAMP'), [NC('STOP')])];
+SOL.t6 = [RG([[NO('START')]], OTL('LAMP')), RG([[NO('STOP')]], OTU('LAMP'))];
+SOL.t7 = [RGM([[NO('START')]], [COIL('LAMP'), COIL('HORN')])];
+SOL.t8 = [RG([[NO('RUN')]], TON('T1', 3)), RG([[NO('T1.DN')]], COIL('BEACON'))];
+SOL.r2 = [RG([[NC('T1.DN')]], TON('T1', 4)), RG([[LES('T1', 2)]], COIL('M_R'))];
+SOL.r3 = [RG([[NC('T1.DN')]], TON('T1', 10)), RG([[LES('T1', 6)]], COIL('M_G')), RG([[GEQ('T1', 6)]], COIL('M_R'))];
+SOL.r4 = [RG([[NC('T1.DN')]], TON('T1', 12)), RG([[LIM('T1', 0, 6)]], COIL('M_G')), RG([[LIM('T1', 6, 8)]], COIL('M_Y')), RG([[GEQ('T1', 8)]], COIL('M_R'))];
+SOL.r5 = [RG([[NC('T1.DN')]], TON('T1', 20)),
+  RG([[LIM('T1', 0, 8)]], COIL('M_G')), RG([[LIM('T1', 8, 10)]], COIL('M_Y')), RG([[GEQ('T1', 10)]], COIL('M_R')),
+  RG([[LIM('T1', 11, 17)]], COIL('C_G')), RG([[LIM('T1', 17, 19)]], COIL('C_Y')), RG([[LES('T1', 11)], [GEQ('T1', 19)]], COIL('C_R'))];
 SOL.r6 = SOL.r5.concat([
-  RG([[NO('PED_BTN')], [NO('PED_REQ')]], COIL('PED_REQ'), [NC('T7.DN')]),
-  RG([[NO('C_G'), NO('PED_REQ')]], TON('T7', 4)),
-  RG([[NO('PED_REQ'), NO('C_G'), NC('T7.DN')]], COIL('WALK')),
+  RG([[NO('PED_BTN')]], OTL('PED_REQ')),
+  RG([[LIM('T1', 15, 15.2)]], OTU('PED_REQ')),
+  RG([[NO('PED_REQ'), LIM('T1', 11, 15)]], COIL('WALK')),
   RG([[NC('WALK')]], COIL('DONT'))]);
-/* Round 7 rewrites the lamp rungs so EMG can override them. */
-SOL.r7 = cycTimers([NC('T6.DN')]).concat([
-  RG([[NO('PED_BTN')], [NO('PED_REQ')]], COIL('PED_REQ'), [NC('T7.DN')]),
-  RG([[NO('EMG')]], TON('T8', 2)),
-  RG([[NO('EMG'), NO('T8.DN'), NC('T10.DN')]], TON('T9', 0.5)),
-  RG([[NO('T9.DN')]], TON('T10', 0.5)),
-  RG([[NC('T1.DN'), NC('EMG')]], COIL('M_G')),
-  RG([[NO('T1.DN'), NC('T2.DN'), NC('EMG')], [NO('EMG'), NC('T8.DN'), NC('T2.DN')]], COIL('M_Y')),
-  RG([[NO('T2.DN')], [NO('EMG'), NO('T8.DN')]], COIL('M_R')),
-  RG([[NO('T3.DN'), NC('T4.DN'), NC('EMG')]], COIL('C_G')),
-  RG([[NO('T4.DN'), NC('T5.DN'), NC('EMG')], [NO('EMG'), NC('T8.DN'), NO('T3.DN'), NC('T5.DN')]], COIL('C_Y')),
-  RG([[NC('T3.DN')], [NO('T5.DN')], [NO('EMG'), NO('T8.DN')]], COIL('C_R')),
-  RG([[NO('C_G'), NO('PED_REQ')]], TON('T7', 4)),
-  RG([[NO('PED_REQ'), NO('C_G'), NC('T7.DN'), NC('EMG')]], COIL('WALK')),
-  RG([[NC('WALK')]], COIL('DONT')),
-  RG([[NO('EMG'), NO('T8.DN'), NC('T9.DN')]], COIL('STROBE'))]);
+SOL.r7 = (() => {
+  const p = clone(SOL.r6); p[0].out.preset = 270;
+  p.push(RG([[LIM('T1', 20, 24)]], COIL('ARROW_G')), RG([[LIM('T1', 24, 26)]], COIL('ARROW_Y')), RG([[LES('T1', 20)], [GEQ('T1', 26)]], COIL('ARROW_R')));
+  return p;
+})();
+/* Preempt: the emergency vehicle is on the main street. Hold the cycle clock at zero, which is main green and cross red. */
 SOL.r8 = (() => {
   const p = clone(SOL.r7);
-  p.forEach(r => { if (r.out.t === 'TON' && /^T[1-6]$/.test(r.out.tag)) r.rows = [[NC('RESTART')]]; });
-  p.unshift(RG([[NO('T6.DN'), NC('LT_CALL')], [NO('T13.DN')]], COIL('RESTART')));
-  p.push(
-    RG([[NO('LOOP_EB')], [NO('LOOP_WB')], [NO('LT_CALL')]], COIL('LT_CALL'), [NC('T13.DN')]),
-    RG([[NO('T6.DN'), NO('LT_CALL')]], TON('T11', 4)),
-    RG([[NO('T6.DN'), NO('LT_CALL')]], TON('T12', 6)),
-    RG([[NO('T6.DN'), NO('LT_CALL')]], TON('T13', 7)),
-    RG([[NO('T6.DN'), NO('LT_CALL'), NC('T11.DN'), NC('EMG')]], COIL('ARROW_G')),
-    RG([[NO('T11.DN'), NC('T12.DN'), NO('LT_CALL'), NC('EMG')]], COIL('ARROW_Y')));
+  p[0].rows = [[NC('T1.DN')]]; p[0].tail = [];  p[0].rows[0].push(NC('PREEMPT'));
+  const find = tag => p.find(r => r.out.tag === tag);
+  find('C_G').rows[0].push(NC('EMG'));
+  find('C_Y').rows.push([NO('EMG'), NC('T2.DN'), LIM('T1', 11, 17)]);
+  find('C_R').rows.push([NO('PREEMPT')]);
+  find('WALK').rows[0].push(NC('EMG'));
+  // timers and the hold bit run first, then the lamps read them
+  p.splice(1, 0, RG([[NO('EMG')]], TON('T2', 2)), RG([[NO('EMG'), NO('M_G')], [NO('EMG'), NO('T2.DN')]], COIL('PREEMPT')));
+  p.push(RG([[NO('EMG'), NO('CLK_FAST')]], COIL('STROBE')));
   return p;
 })();
 const M = 0.4;
-function mainWin(c) {
-  const o = 20 * c;
+function mainWin(c, len) {
+  const o = len * c;
   return [
     win(o + M, o + 8 - M, { M_G: 1, M_Y: 0, M_R: 0 }, `Cycle ${c + 1}: main street green for 8 s`),
     win(o + 8 + M, o + 10 - M, { M_G: 0, M_Y: 1, M_R: 0 }, `Cycle ${c + 1}: main street yellow for 2 s`),
-    win(o + 10 + M, o + 19 - M, { M_G: 0, M_Y: 0, M_R: 1 }, `Cycle ${c + 1}: main street red while cross street runs`)
+    win(o + 10 + M, o + len - M, { M_G: 0, M_Y: 0, M_R: 1 }, `Cycle ${c + 1}: main street red for the rest of the cycle`)
   ];
 }
-function crossWin(c) {
-  const o = 20 * c;
+function crossWin(c, len) {
+  const o = len * c;
   return [
     win(o + M, o + 10 - M, { C_R: 1, C_G: 0, C_Y: 0 }, `Cycle ${c + 1}: cross street red while main runs`),
     win(o + 11 + M, o + 17 - M, { C_G: 1, C_Y: 0, C_R: 0 }, `Cycle ${c + 1}: cross street green for 6 s`),
-    win(o + 17 + M, o + 19 - M, { C_G: 0, C_Y: 1, C_R: 0 }, `Cycle ${c + 1}: cross street yellow for 2 s`)
+    win(o + 17 + M, o + 19 - M, { C_G: 0, C_Y: 1, C_R: 0 }, `Cycle ${c + 1}: cross street yellow for 2 s`),
+    win(o + 19 + M, o + len - M, { C_G: 0, C_Y: 0, C_R: 1 }, `Cycle ${c + 1}: cross street red again`)
+  ];
+}
+function arrowWin(c) {
+  const o = 27 * c;
+  return [
+    win(o + M, o + 20 - M, { ARROW_R: 1, ARROW_Y: 0, ARROW_G: 0 }, `Cycle ${c + 1}: left arrow red while the through traffic runs`),
+    win(o + 20 + M, o + 24 - M, { ARROW_G: 1, ARROW_Y: 0, ARROW_R: 0, M_R: 1, C_R: 1, M_G: 0, M_Y: 0, C_G: 0, C_Y: 0 }, `Cycle ${c + 1}: left arrow green for 4 s with every other signal red`),
+    win(o + 24 + M, o + 26 - M, { ARROW_Y: 1, ARROW_G: 0, ARROW_R: 0 }, `Cycle ${c + 1}: left arrow yellow for 2 s`)
   ];
 }
 const noConflict = never(v => (v.M_G || v.M_Y) && (v.C_G || v.C_Y), 'Main and cross street are never open at the same time', 'both streets were showing green or yellow. That would cause crashes.');
+const noArrowConflict = never(v => v.ARROW_G && (v.M_G || v.M_Y || v.C_G || v.C_Y), 'The left arrow is never green while a through street is open', 'the left arrow was green while a through street was open.');
 const oneMain = oneOf(['M_R', 'M_Y', 'M_G'], 'Main street always shows exactly one color');
 const oneCross = oneOf(['C_R', 'C_Y', 'C_G'], 'Cross street always shows exactly one color');
+const oneArrow = oneOf(['ARROW_R', 'ARROW_Y', 'ARROW_G'], 'The left arrow head always shows exactly one color');
 const walkOnlyGreen = never(v => v.WALK && !v.C_G, 'WALK never shows unless the cross street is green', 'WALK was lit while the cross street was not green.');
-const oneWalk = oneOf(['WALK', 'DONT'], 'Crosswalk always shows WALK or DON’T WALK');
+const oneWalk = oneOf(['WALK', 'DONT'], 'Crosswalk always shows WALK or DON\u2019T WALK');
+const P = ['NO', 'NC', 'COIL', 'TON'];
+const NEW = {
+  LES: 'LES (less than): passes power while a timer\u2019s running value is below a number of seconds.',
+  GEQ: 'GEQ (greater or equal): passes power once a timer\u2019s running value reaches a number of seconds.',
+  LIM: 'LIM (limit): passes power while a timer\u2019s running value is between two numbers. One contact marks a whole phase.',
+  OTL: 'OTL (latch coil): turns its tag ON when powered and keeps it ON, even after power is lost.',
+  OTU: 'OTU (unlatch coil): turns its tag OFF when powered. Pairs with OTL.',
+  CLK: 'System clock bits CLK_1HZ and CLK_FAST: tags the PLC flips on its own. Use them as contacts to flash a lamp with no timers.'
+};
+const newParts = (...k) => k.map(x => ({ id: x === 'CLK' ? 'CLK_FAST' : x, text: NEW[x] }));
+
+const CONCEPT = {
+  t1: { title: 'Power flows left to right', expr: 'LAMP = START', example: SOL.t1,
+    body: 'A rung is a small circuit between a left and a right power rail. A <b>Normally Open (NO) contact</b> is a switch that conducts only while its tag is ON. When power reaches the <b>coil</b> on the right, the coil turns its tag ON. The PLC solves every rung from top to bottom, over and over. Each pass is called a scan.' },
+  t2: { title: 'NOT: the normally closed contact', expr: 'LAMP = NOT START', example: SOL.t2,
+    body: 'A <b>Normally Closed (NC) contact</b> is the opposite of NO. It conducts while its tag is OFF and blocks power while the tag is ON. That is a logical <b>NOT</b>. Use it for stop buttons, guards and interlocks: run unless this is true.' },
+  t3: { title: 'AND: contacts in series', expr: 'LAMP = START AND KEY', example: SOL.t3,
+    body: 'Put contacts one after another on the same row. Power has to pass through every one, so every contact must be closed. That is a logical <b>AND</b>. Add more contacts in the row for more conditions: only if A and B and C.' },
+  t4: { title: 'OR: parallel branches', expr: 'LAMP = START OR START_B', example: SOL.t4,
+    body: 'A <b>branch</b> adds a second row under the first. Power can take either path, so one closed path is enough. That is a logical <b>OR</b>. Remember: <b>rows are OR, contacts along a row are AND</b>. Contacts placed after the branch block apply to every path.' },
+  t5: { title: 'Seal-in: a circuit that remembers', expr: 'LAMP = (START OR LAMP) AND NOT STOP', example: SOL.t5,
+    body: 'Wire a contact of the <b>output itself</b> in parallel with START. Once the lamp is on, its own contact keeps the rung powered after START is released: the circuit <b>seals itself in</b>. STOP is a NC contact placed <b>after</b> the branch so it breaks every path. A seal-in forgets when the PLC loses power or stops running.' },
+  t6: { title: 'Latch and unlatch coils', expr: 'START: set LAMP.   STOP: clear LAMP.', example: SOL.t6,
+    body: 'A <b>latch coil (OTL)</b> turns its tag ON when its rung has power and leaves it ON afterwards. An <b>unlatch coil (OTU)</b> turns it OFF. It is the same memory as a seal-in without the feedback contact, and it is usually <b>retentive</b>: a latched bit survives a power cycle. Rungs run top to bottom, so if both rungs have power in one scan, the <b>lower rung runs last and wins</b>.' },
+  t7: { title: 'Several outputs from one rung', expr: 'START \u2192 LAMP and HORN', example: SOL.t7,
+    body: 'One set of conditions can drive more than one output. An <b>output branch</b> gives the rung a second coil below the first. Every output on the rung receives the same power, which saves repeating the contacts and keeps the outputs from ever disagreeing.' },
+  t8: { title: 'Timers: on-delay (TON)', expr: 'BEACON = RUN for 3 s', example: SOL.t8,
+    body: 'A <b>TON</b> counts up while its rung has power. When it reaches the preset its <b>.DN</b> (done) bit turns on, and you use that bit as a contact elsewhere. If the rung loses power the timer snaps back to zero. The running value is called <b>.ACC</b>.' },
+  r2: { title: 'Compare contacts: one timer, many states', expr: 'M_R = (T1.ACC < 2.0 s)', example: SOL.r2,
+    body: 'A timer\u2019s running value can be tested. <b>LES</b> passes power while .ACC is below a number of seconds. <b>GEQ</b> passes once .ACC has reached one. Run <b>one self-restarting timer</b> (the NC .DN contact restarts it) and decode every lamp from its value, as a real cycle clock does. That replaces a timer per phase.' },
+  r4: { title: 'LIM: a window on the timer', expr: 'M_Y = (6.0 s \u2264 T1.ACC < 8.0 s)', example: SOL.r4,
+    body: '<b>LIM</b> passes power while the timer value is inside a window: from the low number, up to but not including the high number. One contact marks a whole phase, so each lamp rung needs just one.' },
+  r5: { title: 'Two windows, one lamp', recap: true, expr: 'C_R = (T1.ACC < 11 s) OR (T1.ACC \u2265 19 s)', example: [SOL.r5[6]],
+    body: 'Cross red is true before the cross street goes green and again after its yellow. That is <b>OR</b> from Lesson 4: two compare contacts on parallel rows.' },
+  r6: { title: 'Memory for a pedestrian press', recap: true, expr: 'PED_BTN: set PED_REQ.   T1 at 15.0 s: clear PED_REQ.', example: SOL.r6.slice(7, 9),
+    body: 'The pedestrian presses at any time, but WALK only starts at 11 s. A <b>latch coil</b> (Lesson 6) remembers the press and an <b>unlatch coil</b> forgets it as the walk window closes. A <b>seal-in</b> (Lesson 5) would work too.' },
+  r8: { title: 'Hold and override', expr: 'T1 runs while NOT T1.DN AND NOT PREEMPT.   STROBE = EMG AND CLK_FAST', example: [SOL.r8[0], SOL.r8[2], SOL.r8[SOL.r8.length - 1]],
+    body: 'Preemption is an <b>override</b>. A memory bit, PREEMPT, says an emergency has control. Add <b>NOT PREEMPT</b> to the cycle timer rung and the timer stays at zero, which is main green with everything else red. <b>System clock bits</b> such as CLK_FAST flip on their own, so a flashing strobe needs only one contact and no timers.' }
+};
 
 const LEVELS = [
-{ id: 't1', group: 'Tutorial', label: 'Tutorial 1', title: 'Switches and lamps', kind: 'bench',
-  brief: 'A PLC reads <b>inputs</b> (buttons, switches, sensors), runs your ladder once every few milliseconds, then updates <b>outputs</b> (lamps, motors). Power flows left to right across each rung. If it reaches the coil on the right, the output turns on.',
+{ id: 't1', group: 'Tutorial', label: 'Lesson 1', title: 'Contacts and coils', kind: 'bench', noBranch: true, noOutBranch: true, concept: CONCEPT.t1,
+  brief: 'A PLC reads <b>inputs</b> (buttons, switches, sensors), runs your ladder once every scan, then updates <b>outputs</b> (lamps, motors). Each rung is a circuit between two power rails.',
   goal: 'Make the LAMP glow only while the START button is held down.',
   inputs: [I.START], outputs: [{ tag: 'LAMP', label: 'Lamp', color: 'yellow' }], bits: [], timers: 0, palette: ['NO', 'COIL'],
   coach: [
-    { text: 'Click the <b>+</b> at the left end of the rung and add a <b>Normally Open contact</b>. It conducts only while its input is ON.', done: p => hasEl(p, 'NO') },
+    { text: 'Click the <b>+</b> at the left end of the rung and add a <b>Normally Open contact</b>.', done: p => hasEl(p, 'NO') },
     { text: 'Select the contact, then choose the tag <b>START</b> in the inspector.', done: p => hasTag(p, 'NO', 'START') },
     { text: 'Click the <b>+</b> at the far right and add an <b>Output coil</b>. Set its tag to <b>LAMP</b>.', done: p => hasTag(p, 'COIL', 'LAMP') },
     { text: 'Press and hold the START button on the bench. Watch the power flow turn teal and the lamp glow.', done: (p, live) => !!(live && live.tags.LAMP) }],
@@ -444,119 +522,191 @@ const LEVELS = [
     checks: [win(0.2, 0.9, { LAMP: 0 }, 'Lamp is off before START is pressed'), win(1.2, 2.9, { LAMP: 1 }, 'Lamp is on while START is held'), win(3.2, 5, { LAMP: 0 }, 'Lamp goes off when START is released')] }],
   solution: SOL.t1 },
 
-{ id: 't2', group: 'Tutorial', label: 'Tutorial 2', title: 'Memory with a seal-in', kind: 'bench', startFrom: 't1',
-  brief: 'A <b>Normally Closed contact</b> conducts when its input is OFF, so it breaks the rung when pressed. A coil can also feed a contact with the same tag. That makes a <b>seal-in</b>: the output holds itself on after the button is released. Parallel branches mean OR. Contacts in series mean AND.',
-  goal: 'START turns the LAMP on and it stays on. STOP turns it off, even if START is held at the same time.',
-  inputs: [I.START, I.STOP], outputs: [{ tag: 'LAMP', label: 'Lamp', color: 'yellow' }], bits: [], timers: 0, palette: ['NO', 'NC', 'COIL'], branches: true,
+{ id: 't2', group: 'Tutorial', label: 'Lesson 2', title: 'NOT: the normally closed contact', kind: 'bench', startFrom: 't1', noBranch: true, noOutBranch: true, concept: CONCEPT.t2,
+  brief: 'Your rung from Lesson 1 is already here. You only need to change one part.',
+  goal: 'Turn the logic around. The LAMP is ON normally and goes OFF only while START is held.',
+  inputs: [I.START], outputs: [{ tag: 'LAMP', label: 'Lamp', color: 'yellow' }], bits: [], timers: 0, palette: ['NO', 'NC', 'COIL'],
   coach: [
-    { text: 'Build START → LAMP like before.', done: p => hasTag(p, 'NO', 'START') && hasTag(p, 'COIL', 'LAMP') },
-    { text: 'Use <b>⑂ Branch</b> on the rung and put a contact with tag <b>LAMP</b> in the new row. The lamp now feeds itself.', done: p => p.some(r => r.rows.length > 1 && r.rows.some(w => w.some(e => e.tag === 'LAMP'))) },
-    { text: 'Add a <b>Normally Closed</b> contact on STOP after the branch (in the section to the right of it). It must break both paths.', done: p => p.some(r => r.tail.some(e => e.t === 'NC' && e.tag === 'STOP')) }],
+    { text: 'Click the START contact in the rung to select it.', done: p => hasEl(p, 'NO') || hasEl(p, 'NC') },
+    { text: 'In the inspector, switch it from <b>NO</b> to <b>NC</b>. Same tag, opposite meaning.', done: p => hasTag(p, 'NC', 'START') },
+    { text: 'The lamp is now on by itself. Hold START on the bench to switch it off.', done: (p, live) => !!(live && live.tags.START && !live.tags.LAMP && hasTag(p, 'NC', 'START')) }],
+  hints: ['No new parts are needed. Flip NO to NC in the inspector.'],
+  scenarios: [{ name: 'Lamp is the opposite of the button', desc: 'START held from 2 to 4 s', duration: 6, events: hold('START', 2, 4),
+    checks: [win(0.2, 1.9, { LAMP: 1 }, 'Lamp is on when START is not pressed'), win(2.2, 3.9, { LAMP: 0 }, 'Lamp is off while START is held'), win(4.2, 6, { LAMP: 1 }, 'Lamp comes back on when START is released')] }],
+  solution: SOL.t2 },
+
+{ id: 't3', group: 'Tutorial', label: 'Lesson 3', title: 'AND: contacts in series', kind: 'bench', startFrom: 't1', noBranch: true, noOutBranch: true, concept: CONCEPT.t3,
+  brief: 'Your START to LAMP rung carries over. Add a second condition to it.',
+  goal: 'The LAMP lights only while START is held <b>and</b> the KEY switch is on.',
+  inputs: [I.KEY, I.START], outputs: [{ tag: 'LAMP', label: 'Lamp', color: 'yellow' }], bits: [], timers: 0, palette: ['NO', 'NC', 'COIL'],
+  coach: [
+    { text: 'Press the <b>+</b> after the START contact and add another <b>Normally Open contact</b>.', done: p => p.some(r => r.rows[0].length >= 2) },
+    { text: 'Set the new contact\u2019s tag to <b>KEY</b>.', done: p => hasTag(p, 'NO', 'KEY') },
+    { text: 'On the bench, turn KEY on, then hold START. Try START alone, too.', done: (p, live) => !!(live && live.tags.LAMP) }],
+  hints: ['Contacts in a row are AND. Both must be closed for power to reach the coil.'],
+  scenarios: [{ name: 'Both conditions required', desc: 'START alone, KEY alone, both, then KEY off', duration: 11,
+    events: [].concat(hold('START', 1, 2), [{ t: 3, tag: 'KEY', v: true }], hold('START', 4, 5), [{ t: 9, tag: 'KEY', v: false }], hold('START', 9.5, 10.5)),
+    checks: [win(1.2, 1.9, { LAMP: 0 }, 'START alone does nothing', 'Both contacts must be in the same row, one after the other.'), win(3.2, 3.9, { LAMP: 0 }, 'KEY alone does nothing'), win(4.2, 4.9, { LAMP: 1 }, 'KEY and START together light the lamp', 'Add a NO contact on KEY after START.'), win(5.2, 8.9, { LAMP: 0 }, 'Releasing START turns it off'), win(9.7, 10.4, { LAMP: 0 }, 'START without KEY does nothing')] }],
+  solution: SOL.t3 },
+
+{ id: 't4', group: 'Tutorial', label: 'Lesson 4', title: 'OR: parallel branches', kind: 'bench', startFrom: 't1', noOutBranch: true, concept: CONCEPT.t4,
+  brief: 'Your START to LAMP rung carries over again. This time add a second way to turn the lamp on.',
+  goal: 'The LAMP lights while <b>either</b> START or START_B is held (or both).',
+  inputs: [I.START, I.START_B], outputs: [{ tag: 'LAMP', label: 'Lamp', color: 'yellow' }], bits: [], timers: 0, palette: ['NO', 'NC', 'COIL'],
+  coach: [
+    { text: 'Press <b>\u2442 Branch</b> in the rung header. A second row appears under the first.', done: p => p.some(r => r.rows.length > 1) },
+    { text: 'Use the <b>+</b> in the new row to add a contact. Set its tag to <b>START_B</b>.', done: p => hasTag(p, 'NO', 'START_B') },
+    { text: 'Press either button on the bench. Power takes whichever path is closed.', done: (p, live) => !!(live && live.tags.LAMP) }],
+  hints: ['The new contact goes in the second row, not after START.', 'Rows are OR. Contacts along one row are AND.'],
+  scenarios: [{ name: 'Either button works', desc: 'START, then START_B, then both', duration: 8,
+    events: [].concat(hold('START', 1, 2), hold('START_B', 3, 4), hold('START', 5, 6.5), hold('START_B', 5.5, 7)),
+    checks: [win(0.2, 0.9, { LAMP: 0 }, 'Off when nothing is pressed'), win(1.2, 1.9, { LAMP: 1 }, 'START alone lights the lamp'), win(2.2, 2.9, { LAMP: 0 }, 'Off again'), win(3.2, 3.9, { LAMP: 1 }, 'START_B alone lights the lamp', 'Put the START_B contact in its own row (use Branch), not in series with START.'), win(5.7, 6.4, { LAMP: 1 }, 'Both pressed still lights it'), win(7.2, 8, { LAMP: 0 }, 'Off when released')] }],
+  solution: SOL.t4 },
+
+{ id: 't5', group: 'Tutorial', label: 'Lesson 5', title: 'Seal-in: a circuit that remembers', kind: 'bench', startFrom: 't1', noOutBranch: true, concept: CONCEPT.t5,
+  brief: 'A motor start station uses one button to start and one to stop. The START button is only pressed for a moment, so the circuit must remember. Your rung from Lesson 1 is here to build on.',
+  goal: 'START turns the LAMP on and it stays on. STOP turns it off, even if START is held at the same time.',
+  inputs: [I.START, I.STOP], outputs: [{ tag: 'LAMP', label: 'Lamp', color: 'yellow' }], bits: [], timers: 0, palette: ['NO', 'NC', 'COIL'],
+  coach: [
+    { text: 'Press <b>\u2442 Branch</b> and put a contact tagged <b>LAMP</b> in the new row. The lamp now feeds itself.', done: p => p.some(r => r.rows.length > 1 && r.rows.some(w => w.some(e => e.tag === 'LAMP'))) },
+    { text: 'Use the <b>+</b> right after the branch block to add a <b>Normally Closed</b> contact on <b>STOP</b>. It must break both paths.', done: p => p.some(r => r.tail.some(e => e.t === 'NC' && e.tag === 'STOP')) },
+    { text: 'Press START briefly on the bench. The lamp stays on. Press STOP to release it.', done: (p, live) => !!(live && live.tags.LAMP && !live.tags.START) }],
   hints: ['If STOP sits inside one branch row, the other row still keeps the lamp on. Put it after the branch.', 'Rows are OR. Anything placed after the branch block is AND with the whole block.'],
   scenarios: [{ name: 'Latch, stop, latch again', desc: 'START at 1 s, STOP at 5 s, START at 9 s, then START and STOP together at 12 s', duration: 15,
     events: [].concat(press('START', 1, 0.5), press('STOP', 5, 0.5), press('START', 9, 0.5), hold('START', 12, 14), hold('STOP', 12, 14)),
-    checks: [win(0.2, 0.9, { LAMP: 0 }, 'Off at power-up'), win(2, 4.8, { LAMP: 1 }, 'Stays on after START is released', 'Add a branch (\u2442) under START and put a contact tagged LAMP in it, so the lamp feeds itself.'), win(6, 8.8, { LAMP: 0 }, 'STOP turns it off', 'Add a Normally Closed contact tagged STOP.'), win(10, 11.8, { LAMP: 1 }, 'START latches it on again'), win(12.4, 14, { LAMP: 0 }, 'STOP wins when both are pressed', 'STOP must cut power on every path. If the NC STOP contact sits inside one branch row, the other row still holds the lamp on. Put it after the branch block, to the right of both rows.')] }],
-  solution: SOL.t2 },
+    checks: [win(0.2, 0.9, { LAMP: 0 }, 'Off at power-up'), win(2, 4.8, { LAMP: 1 }, 'Stays on after START is released', 'Add a branch (\u2442) under START and put a contact tagged LAMP in it, so the lamp feeds itself.'), win(6, 8.8, { LAMP: 0 }, 'STOP turns it off', 'Add a Normally Closed contact tagged STOP.'), win(10, 11.8, { LAMP: 1 }, 'START latches it on again'),
+      win(12.4, 14, { LAMP: 0 }, 'STOP wins when both are pressed', 'STOP must cut power on every path. If the NC STOP contact sits inside one branch row, the other row still holds the lamp on. Put it after the branch block, to the right of both rows.')] }],
+  solution: SOL.t5 },
 
-{ id: 't3', group: 'Tutorial', label: 'Tutorial 3', title: 'Timers', kind: 'bench',
-  brief: 'A <b>TON</b> (timer on-delay) counts while its rung has power. When the count reaches the preset, its <b>.DN</b> (done) bit turns on. If power is lost the timer resets to zero. Use the done bit as a contact in another rung. Click a timer and set its preset in seconds.',
+{ id: 't6', group: 'Tutorial', label: 'Lesson 6', title: 'Latch and unlatch coils', kind: 'bench', noBranch: true, noOutBranch: true, concept: CONCEPT.t6,
+  brief: 'The same memory as Lesson 5, but built from two special coils instead of wiring the output back to itself. Branches are switched off in this lesson on purpose.',
+  goal: 'START latches the LAMP on. STOP unlatches it. If both are pressed together, STOP must win.',
+  inputs: [I.START, I.STOP], outputs: [{ tag: 'LAMP', label: 'Lamp', color: 'yellow' }], bits: [], timers: 0, palette: ['NO', 'NC', 'OTL', 'OTU'],
+  coach: [
+    { text: 'Rung 1: START contact \u2192 <b>Latch coil</b> (OTL) on LAMP.', done: p => hasTag(p, 'NO', 'START') && hasTag(p, 'OTL', 'LAMP') },
+    { text: 'Press <b>+ Rung</b>. Rung 2: STOP contact \u2192 <b>Unlatch coil</b> (OTU) on LAMP.', done: p => hasTag(p, 'NO', 'STOP') && hasTag(p, 'OTU', 'LAMP') },
+    { text: 'Keep the unlatch rung <b>below</b> the latch rung. The lower rung runs last, so it wins.', done: p => { const a = p.findIndex(r => r.out && r.out.t === 'OTL'), b = p.findIndex(r => r.out && r.out.t === 'OTU'); return a >= 0 && b > a; } }],
+  hints: ['A latch coil needs no feedback contact. It simply stays on.', 'The OTU rung must come after the OTL rung. Use the arrow buttons to reorder rungs.'],
+  scenarios: [{ name: 'Latch, unlatch, latch again', desc: 'START at 1 s, STOP at 5 s, START at 9 s, then START and STOP together at 12 s', duration: 15,
+    events: [].concat(press('START', 1, 0.5), press('STOP', 5, 0.5), press('START', 9, 0.5), hold('START', 12, 14), hold('STOP', 12, 14)),
+    checks: [win(0.2, 0.9, { LAMP: 0 }, 'Off at power-up'), win(2, 4.8, { LAMP: 1 }, 'Stays on after START is released', 'Rung: START contact feeding an OTL coil on LAMP.'), win(6, 8.8, { LAMP: 0 }, 'STOP turns it off', 'Rung: STOP contact feeding an OTU coil on LAMP.'), win(10, 11.8, { LAMP: 1 }, 'START latches it on again'),
+      win(12.4, 14, { LAMP: 0 }, 'STOP wins when both are pressed', 'When both rungs have power in the same scan, the rung lower in the ladder runs last and wins. Put the OTU rung below the OTL rung.')] }],
+  solution: SOL.t6 },
+
+{ id: 't7', group: 'Tutorial', label: 'Lesson 7', title: 'Several outputs from one rung', kind: 'bench', startFrom: 't1', noBranch: true, concept: CONCEPT.t7,
+  brief: 'Machines often need more than one thing to happen at once: a lamp and a horn, a motor and its indicator. Your START to LAMP rung is here again.',
+  goal: 'START turns on the LAMP and the HORN together, using <b>one rung</b>.',
+  inputs: [I.START], outputs: [{ tag: 'LAMP', label: 'Lamp', color: 'yellow' }, { tag: 'HORN', label: 'Horn', color: 'blue' }], bits: [], timers: 0, palette: ['NO', 'COIL'],
+  coach: [
+    { text: 'Press <b>\u2442 Output</b> in the rung header. A second output slot opens below the first.', done: p => p.some(r => r.more && r.more.length > 0) },
+    { text: 'Use its <b>+</b> to add an <b>Output coil</b>. Set the tag to <b>HORN</b>.', done: p => hasTag(p, 'COIL', 'HORN') },
+    { text: 'Hold START on the bench. Both outputs get the same power.', done: (p, live) => !!(live && live.tags.LAMP && live.tags.HORN) }],
+  hints: ['Do not add a second rung. Use the Output button on the rung you have.'],
+  scenarios: [{ name: 'Lamp and horn together', desc: 'START held from 1 to 3 s', duration: 5, events: hold('START', 1, 3),
+    checks: [win(0.2, 0.9, { LAMP: 0, HORN: 0 }, 'Both are off before START'), win(1.2, 2.9, { LAMP: 1, HORN: 1 }, 'Both come on while START is held', 'Add a coil for HORN in an output branch of the same rung.'), win(3.2, 5, { LAMP: 0, HORN: 0 }, 'Both go off together')] }],
+  structure: [{ label: 'One rung drives both outputs', test: p => { const used = p.filter(r => r.rows.some(w => w.length) || r.tail.length || r.out); return used.length === 1 && allOuts(used[0]).length === 2; }, why: 'Two outputs on two separate rungs is not what this lesson is about.', hint: 'Delete the extra rung and use \u2442 Output on the first rung instead.' }],
+  solution: SOL.t7 },
+
+{ id: 't8', group: 'Tutorial', label: 'Lesson 8', title: 'Timers', kind: 'bench', noBranch: true, noOutBranch: true, concept: CONCEPT.t8,
+  brief: 'A <b>TON</b> (timer on-delay) counts while its rung has power. When the count reaches the preset, its <b>.DN</b> (done) bit turns on. If power is lost the timer resets to zero. Click a timer and set its preset in seconds.',
   goal: 'Flip the RUN switch on. The BEACON lights 3 seconds later. Switching RUN off turns it off at once and resets the delay.',
   inputs: [I.RUN], outputs: [{ tag: 'BEACON', label: 'Beacon', color: 'red' }], bits: [], timers: 2, palette: ['NO', 'NC', 'COIL', 'TON'],
   coach: [
-    { text: 'Rung 1: RUN contact → <b>Timer</b> T1 with a 3.0 s preset.', done: p => p.some(r => r.out && r.out.t === 'TON' && r.out.preset === 30) },
-    { text: 'Rung 2: a contact on <b>T1.DN</b> → BEACON coil.', done: p => hasTag(p, 'NO', 'T1.DN') && hasTag(p, 'COIL', 'BEACON') },
+    { text: 'Rung 1: RUN contact \u2192 <b>Timer</b> T1 with a 3.0 s preset.', done: p => p.some(r => allOuts(r).some(o => o.t === 'TON' && o.preset === 30)) },
+    { text: 'Rung 2: a contact on <b>T1.DN</b> \u2192 BEACON coil.', done: p => hasTag(p, 'NO', 'T1.DN') && hasTag(p, 'COIL', 'BEACON') },
     { text: 'Flip RUN on and watch the timer count on the bench.', done: (p, live) => !!(live && live.timers.T1 && live.timers.T1.acc > 0) }],
   hints: ['The timer is an output. The beacon is a separate rung that reads T1.DN.'],
-  scenarios: [{ name: 'Delay, then reset', desc: 'RUN on 1–8 s, a 1 s blip at 11–12 s, then on from 14 s', duration: 20,
+  scenarios: [{ name: 'Delay, then reset', desc: 'RUN on 1\u20138 s, a 1 s blip at 11\u201312 s, then on from 14 s', duration: 20,
     events: [].concat(hold('RUN', 1, 8), hold('RUN', 11, 12), [{ t: 14, tag: 'RUN', v: true }]),
     checks: [win(0.2, 3.8, { BEACON: 0 }, 'Off before the delay ends'), win(4.3, 7.9, { BEACON: 1 }, 'On 3 s after RUN'), win(8.2, 10.9, { BEACON: 0 }, 'Off when RUN is switched off'),
       win(11.2, 16.8, { BEACON: 0 }, 'A short blip does not light it, and the delay restarts', 'A timer only resets when its rung loses power, so the RUN contact must feed the timer rung directly.'), win(17.4, 20, { BEACON: 1 }, 'On again 3 s after the second RUN')] }],
-  solution: SOL.t3 },
+  solution: SOL.t8 },
 
-{ id: 'r2', group: 'Round', label: 'Round 2', title: 'Blinking red', kind: 'traffic', startFrom: null,
-  brief: 'A four-way intersection with no power to the other lamps yet. You are building the signal controller from the ground up. Real signals flash red when they fault, so start there. Use two timers that run on the same rung condition and restart each other.',
+{ id: 'r2', group: 'Round', label: 'Round 2', title: 'Blinking red', kind: 'traffic', concept: CONCEPT.r2, startFrom: null,
+  brief: 'A four-way intersection with no power to the other lamps yet. Real signals flash red when they fault, so start there. Rather than chaining timers, run <b>one timer</b> that restarts itself and read its <b>running value</b> with a compare contact. One timer can then drive every phase of a signal.',
   goal: 'Main street RED is on for 2 s, then off for 2 s, repeating forever. It starts on.',
-  inputs: [], outputs: [O.M_R], bits: [], timers: 4, palette: ['NO', 'NC', 'COIL', 'TON'],
-  hints: ['Timer T1 = 2 s, timer T2 = 4 s. Both run while T2.DN is off. That restarts them both.', 'The lamp is on while T1.DN is off.'],
+  inputs: [], outputs: [O.M_R], bits: [], timers: 3, palette: P.concat(['LES', 'GEQ']), newParts: newParts('LES', 'GEQ'),
+  hints: ['Rung 1: a NC contact on T1.DN feeds timer T1 (4 s). When it finishes, the contact opens, the timer resets and starts over.', 'Rung 2: a LES contact on T1 set to 2.0 s feeds the M_R coil. The lamp is on while T1 reads less than 2 s.', 'Two chained timers also work. The tests only look at the lamp.'],
   scenarios: [{ name: 'Free-running blink', desc: 'No inputs, 12 s', duration: 12,
     checks: [win(0.3, 2 - M + 0.1, { M_R: 1 }, 'ON for the first 2 s'), win(2 + M, 4 - M, { M_R: 0 }, 'OFF for the next 2 s'), win(4.4, 5.6, { M_R: 1 }, 'ON again'), win(6.5, 7.5, { M_R: 0 }, 'OFF again'), win(8.5, 9.5, { M_R: 1 }, 'ON a third time')] }],
   solution: SOL.r2 },
 
 { id: 'r3', group: 'Round', label: 'Round 3', title: 'Add the green', kind: 'traffic', startFrom: 'r2',
-  brief: 'Now a real two-state signal. The same stacked-timer trick works: each timer’s preset is the total elapsed time at which its phase ends.',
-  goal: 'Main GREEN for 6 s, then main RED for 4 s, repeating. Never both at once.',
-  inputs: [], outputs: [O.M_R, O.M_G], bits: [], timers: 4, palette: ['NO', 'NC', 'COIL', 'TON'],
-  hints: ['T1 ends the green at 6 s. T2 ends the cycle at 10 s.', 'Green = NOT T1.DN. Red = T1.DN.'],
+  brief: 'Now a real two-state signal. Longer cycle, same single timer. Change the timer\u2019s preset to the full cycle length, then mark each phase by where the timer\u2019s value falls.',
+  goal: 'Main GREEN for 6 s, then main RED for 4 s, repeating (10 s cycle). Never both at once.',
+  inputs: [], outputs: [O.M_R, O.M_G], bits: [], timers: 3, palette: P.concat(['LES', 'GEQ']),
+  hints: ['Set T1 to 10 s.', 'Green = T1 less than 6.0 s. Red = T1 at least 6.0 s.'],
   scenarios: [{ name: 'Two-phase cycle', desc: 'No inputs, 32 s', duration: 32,
     checks: [win(M, 6 - M, { M_G: 1, M_R: 0 }, 'Green for 6 s'), win(6 + M, 10 - M, { M_G: 0, M_R: 1 }, 'Red for 4 s'), win(10 + M, 16 - M, { M_G: 1, M_R: 0 }, 'Green again'), win(16 + M, 20 - M, { M_G: 0, M_R: 1 }, 'Red again'), win(20 + M, 26 - M, { M_G: 1, M_R: 0 }, 'Green a third time'),
       oneOf(['M_R', 'M_G'], 'One lamp is always lit')] }],
   solution: SOL.r3 },
 
-{ id: 'r4', group: 'Round', label: 'Round 4', title: 'Add the yellow', kind: 'traffic', startFrom: 'r3',
-  brief: 'Yellow warns drivers that red is coming. Add a third phase between green and red. You need one more timer.',
+{ id: 'r4', group: 'Round', label: 'Round 4', title: 'Add the yellow', kind: 'traffic', concept: CONCEPT.r4, startFrom: 'r3',
+  brief: 'Yellow warns drivers that red is coming. Add a third phase between green and red. Writing LES for one phase and GEQ for another gets awkward for a middle phase, so you get a contact that tests a window.',
   goal: 'Main street: GREEN 6 s, YELLOW 2 s, RED 4 s. Repeat (12 s cycle).',
-  inputs: [], outputs: [O.M_R, O.M_Y, O.M_G], bits: [], timers: 5, palette: ['NO', 'NC', 'COIL', 'TON'],
-  hints: ['Presets 6, 8 and 12 seconds. All three timers run while T3.DN is off.', 'Yellow = T1.DN and NOT T2.DN.'],
+  inputs: [], outputs: [O.M_R, O.M_Y, O.M_G], bits: [], timers: 3, palette: P.concat(['LES', 'GEQ', 'LIM']), newParts: newParts('LIM'),
+  hints: ['Set T1 to 12 s.', 'Yellow = LIM on T1 from 6.0 to 8.0 s. Red starts at 8.0 s.'],
   scenarios: [{ name: 'Three-phase cycle', desc: 'No inputs, 36 s', duration: 36,
     checks: [0, 1, 2].flatMap(c => [win(c * 12 + M, c * 12 + 6 - M, { M_G: 1, M_Y: 0, M_R: 0 }, `Cycle ${c + 1}: green for 6 s`), win(c * 12 + 6 + M, c * 12 + 8 - M, { M_G: 0, M_Y: 1, M_R: 0 }, `Cycle ${c + 1}: yellow for 2 s`), win(c * 12 + 8 + M, c * 12 + 12 - M, { M_G: 0, M_Y: 0, M_R: 1 }, `Cycle ${c + 1}: red for 4 s`)])
       .concat([oneMain]) }],
   solution: SOL.r4 },
 
-{ id: 'r5', group: 'Round', label: 'Round 5', title: 'Cross street', kind: 'traffic', startFrom: 'r4',
-  brief: 'Two streets, one intersection. The cross street may only go while the main street is red. Leave a one second all-red gap between phases so late drivers can clear. Safety is graded here: a single scan with both streets open fails the round.',
-  goal: 'Main G 0–8 s, Y 8–10 s, red from 10 s. Cross: red until 11 s, G 11–17 s, Y 17–19 s, red again. Cycle is 20 s.',
-  inputs: [], outputs: [O.M_R, O.M_Y, O.M_G, O.C_R, O.C_Y, O.C_G], bits: [], timers: 8, palette: ['NO', 'NC', 'COIL', 'TON'],
-  hints: ['Six timers with presets 8, 10, 11, 17, 19, 20 s. All restart when T6.DN is on.', 'Cross red = NOT T3.DN, OR T5.DN. Use a parallel branch.'],
+{ id: 'r5', group: 'Round', label: 'Round 5', title: 'Cross street', kind: 'traffic', concept: CONCEPT.r5, startFrom: 'r4',
+  brief: 'Two streets, one intersection. The cross street may only go while the main street is red. Leave a one second all-red gap between phases so late drivers can clear. Safety is graded: a single scan with both streets open fails the round. Still one timer. The cycle just gets longer.',
+  goal: 'Cycle 20 s. Main: green 0\u20138 s, yellow 8\u201310 s, red after. Cross: red until 11 s, green 11\u201317 s, yellow 17\u201319 s, red again.',
+  inputs: [], outputs: [O.M_R, O.M_Y, O.M_G, O.C_R, O.C_Y, O.C_G], bits: [], timers: 3, palette: P.concat(['LES', 'GEQ', 'LIM']),
+  hints: ['Set T1 to 20 s.', 'Use the Duplicate button on a lamp rung, then change the tag and the numbers.', 'Cross red is true for two windows: before 11 s and from 19 s. Use a parallel branch with two contacts.'],
   scenarios: [{ name: 'Full cycle', desc: 'No inputs, 50 s', duration: 50,
-    checks: [].concat(mainWin(0), crossWin(0), mainWin(1), crossWin(1), mainWin(2).slice(0, 2), [noConflict, oneMain, oneCross]) }],
+    checks: [].concat(mainWin(0, 20), crossWin(0, 20), mainWin(1, 20), crossWin(1, 20), mainWin(2, 20).slice(0, 2), [noConflict, oneMain, oneCross]) }],
   solution: SOL.r5 },
 
-{ id: 'r6', group: 'Round', label: 'Round 6', title: 'Crosswalk', kind: 'traffic', startFrom: 'r5',
-  brief: 'Pedestrians cross the main street while the cross street has the green. They press a button, and the PLC must <b>remember</b> the press until it can serve it. WALK shows for 4 s at the start of the cross green. Otherwise DON’T WALK stays lit.',
-  goal: 'A press remembered by PED_REQ gives WALK for 4 s during the next cross street green. Without a press, WALK never shows.',
-  inputs: [I.PED_BTN], outputs: [O.M_R, O.M_Y, O.M_G, O.C_R, O.C_Y, O.C_G, O.WALK, O.DONT], bits: ['PED_REQ'], bitsInfo: [BITS.PED_REQ], timers: 9, palette: ['NO', 'NC', 'COIL', 'TON'], branches: true,
-  hints: ['Seal in PED_REQ with a branch, and clear it with a NC contact on T7.DN after the branch.', 'T7 (4 s) runs while C_G and PED_REQ are on. WALK = PED_REQ, C_G, NOT T7.DN.', 'DON’T WALK = NOT WALK.'],
+{ id: 'r6', group: 'Round', label: 'Round 6', title: 'Crosswalk', kind: 'traffic', concept: CONCEPT.r6, startFrom: 'r5',
+  brief: 'Pedestrians cross the main street while the cross street has the green. They press a button, and the PLC must <b>remember</b> the press until it can serve it. WALK shows for the first 4 s of the cross green. Otherwise DON\u2019T WALK stays lit. A latch coil remembers the press, and an unlatch coil forgets it.',
+  goal: 'A press is remembered in PED_REQ. WALK shows from 11 s to 15 s of the cycle if a press is waiting. The request clears at 15 s. Without a press, WALK never shows.',
+  inputs: [I.PED_BTN], outputs: [O.M_R, O.M_Y, O.M_G, O.C_R, O.C_Y, O.C_G, O.WALK, O.DONT], bits: ['PED_REQ'], bitsInfo: [BITS.PED_REQ], timers: 3, palette: P.concat(['LES', 'GEQ', 'LIM', 'OTL', 'OTU']), newParts: newParts('OTL', 'OTU'),
+  hints: ['Rung: PED_BTN contact \u2192 OTL on PED_REQ. A press is remembered forever.', 'Rung: LIM T1 15.0 to 15.2 s \u2192 OTU on PED_REQ. It forgets the request just as the walk window closes.', 'WALK = PED_REQ and LIM T1 11.0 to 15.0 s. DON\u2019T WALK = NOT WALK.', 'A seal-in branch (Tutorial 2) works too.'],
   scenarios: [
-    { name: 'Nobody presses', desc: 'No presses, 22 s', duration: 22, checks: [].concat(mainWin(0), crossWin(0), [win(M, 22 - M, { WALK: 0, DONT: 1 }, 'WALK never shows, DON’T WALK always does'), noConflict]) },
+    { name: 'Nobody presses', desc: 'No presses, 22 s', duration: 22, checks: [].concat(mainWin(0, 20), crossWin(0, 20), [win(M, 22 - M, { WALK: 0, DONT: 1 }, 'WALK never shows, DON\u2019T WALK always does'), noConflict]) },
     { name: 'Pedestrian presses at 2 s', desc: 'Button pressed at 2 s and again at 45 s', duration: 58, events: [].concat(press('PED_BTN', 2, 0.5), press('PED_BTN', 45, 0.5)),
-      checks: [win(M, 10.6, { WALK: 0, DONT: 1 }, 'DON’T WALK while waiting'), win(11.3, 14.7, { WALK: 1, DONT: 0 }, 'WALK for 4 s when the cross street goes green'), win(15.3, 16.7, { WALK: 0, DONT: 1 }, 'DON’T WALK after the 4 s'),
+      checks: [win(M, 10.6, { WALK: 0, DONT: 1 }, 'DON\u2019T WALK while waiting'), win(11.3, 14.7, { WALK: 1, DONT: 0 }, 'WALK for 4 s when the cross street goes green'), win(15.3, 16.7, { WALK: 0, DONT: 1 }, 'DON\u2019T WALK after the 4 s'),
         win(17.3, 50.4, { WALK: 0, DONT: 1 }, 'One press serves one crossing only. The request is cleared.'), win(51.6, 54.6, { WALK: 1, DONT: 0 }, 'A later press is served at the next cross green'), walkOnlyGreen, oneWalk, noConflict, oneMain, oneCross] }],
   solution: SOL.r6 },
 
-{ id: 'r7', group: 'Round', label: 'Round 7', title: 'Emergency preempt', kind: 'traffic', startFrom: 'r6',
-  brief: 'A fire engine or ambulance needs the whole intersection. A preempt input from the vehicle forces the signal into a safe state. Any green first goes <b>yellow for 2 s</b> (clearance), then <b>everything goes red</b> and the <b>strobe flashes</b> twice a second. When EMG drops, normal operation resumes. Normal lamps must now be blocked by EMG, so edit the lamp rungs.',
-  goal: 'EMG on: green becomes yellow for 2 s, then all red, WALK off, strobe flashing. EMG off: strobe off and the cycle carries on safely.',
-  inputs: [I.PED_BTN, I.EMG], outputs: [O.M_R, O.M_Y, O.M_G, O.C_R, O.C_Y, O.C_G, O.WALK, O.DONT, O.STROBE], bits: ['PED_REQ'], bitsInfo: [BITS.PED_REQ], timers: 12, palette: ['NO', 'NC', 'COIL', 'TON'], branches: true,
-  hints: ['A timer T8 (2 s) on EMG gives you the yellow clearance window and the point where all-red starts.', 'Main yellow also lights when EMG is on, T8 is not done, and the main street is not red (NOT T2.DN).', 'Strobe: two 0.5 s timers that restart each other, like the blink in Round 2. STROBE = EMG, T8.DN, NOT T9.DN.', 'Add NOT EMG to every normal green rung and to WALK.'],
-  scenarios: [
-    { name: 'Preempt during main green', desc: 'EMG on from 3 s to 15 s', duration: 26, events: hold('EMG', 3, 15),
-      checks: [win(M, 2.6, { M_G: 1, STROBE: 0 }, 'Normal operation before the call'), win(3.4, 4.7, { M_G: 0, M_Y: 1, C_R: 1 }, 'Main green drops to yellow right away'),
-        win(5.5, 14.7, { M_R: 1, C_R: 1, M_G: 0, M_Y: 0, C_G: 0, C_Y: 0, WALK: 0, DONT: 1 }, 'Everything red while EMG is on'), blinks('STROBE', 5.5, 14.7, 10, 'Strobe flashes while all red'),
-        win(15.6, 26, { STROBE: 0 }, 'Strobe off after EMG releases'), noConflict, oneMain, oneCross] },
-    { name: 'Preempt during cross green', desc: 'Pedestrian waiting, EMG on from 13 s to 22 s', duration: 30, events: [].concat(press('PED_BTN', 2, 0.5), hold('EMG', 13, 22)),
-      checks: [win(13.4, 14.7, { C_G: 0, C_Y: 1, M_R: 1 }, 'Cross green drops to yellow'), win(15.5, 21.7, { C_R: 1, M_R: 1, C_G: 0, C_Y: 0, WALK: 0, DONT: 1 }, 'All red, no WALK'), blinks('STROBE', 15.5, 21.7, 8, 'Strobe flashes'),
-        win(22.6, 30, { STROBE: 0 }, 'Strobe off after release'), walkOnlyGreen, noConflict, oneMain, oneCross, oneWalk] }],
+{ id: 'r7', group: 'Round', label: 'Round 7', title: 'Left-turn arrows', kind: 'traffic', startFrom: 'r6',
+  brief: 'Add a <b>protected left-turn arrow</b> for both directions of the main street, every cycle. It runs at the end of the cycle, after the cross street clears: arrow green 4 s, arrow yellow 2 s, then red. Every other signal stays red during the arrow. Because the whole signal is driven by one timer, you only have to lengthen the cycle and add three lamp rungs.',
+  goal: 'Cycle becomes 27 s. Left arrow GREEN 20\u201324 s, YELLOW 24\u201326 s, RED the rest of the time. Everything else stays as before.',
+  inputs: [I.PED_BTN], outputs: [O.M_R, O.M_Y, O.M_G, O.C_R, O.C_Y, O.C_G, O.WALK, O.DONT, O.ARROW_R, O.ARROW_Y, O.ARROW_G], bits: ['PED_REQ'], bitsInfo: [BITS.PED_REQ], timers: 3, palette: P.concat(['LES', 'GEQ', 'LIM', 'OTL', 'OTU']),
+  hints: ['Set T1 to 27 s. The existing main red and cross red rungs already cover the arrow time.', 'ARROW_G = LIM T1 20 to 24. ARROW_Y = LIM T1 24 to 26. ARROW_R = LES 20, or GEQ 26 (two contacts in parallel).'],
+  scenarios: [{ name: 'Full cycle with arrows', desc: 'No inputs, 64 s', duration: 64,
+    checks: [].concat(mainWin(0, 27), crossWin(0, 27), arrowWin(0), mainWin(1, 27), crossWin(1, 27), arrowWin(1), mainWin(2, 27).slice(0, 2), [noConflict, noArrowConflict, oneMain, oneCross, oneArrow]) }],
   solution: SOL.r7 },
 
-{ id: 'r8', group: 'Bonus', label: 'Bonus', title: 'Left-turn arrows', kind: 'traffic', startFrom: 'r7',
-  brief: 'Ground loops in the left-turn pockets sense waiting cars. A <b>LOOP</b> input is ON while a car sits on it. If anyone has called, add a protected left phase at the end of the cycle: arrow GREEN 4 s, arrow YELLOW 2 s, 1 s all-red. If nobody called, skip it. The cycle restart now needs a memory bit, so the six main timers will run on <b>NOT RESTART</b> instead of NOT T6.DN.',
-  goal: 'A loop call is remembered. After the normal 20 s cycle, show the arrow for 4 s green and 2 s yellow, then restart. No call means no arrow and no delay.',
-  inputs: [I.PED_BTN, I.EMG, I.LOOP_EB, I.LOOP_WB], outputs: [O.M_R, O.M_Y, O.M_G, O.C_R, O.C_Y, O.C_G, O.WALK, O.DONT, O.STROBE, O.ARROW_G, O.ARROW_Y],
-  bits: ['PED_REQ', 'RESTART', 'LT_CALL'], bitsInfo: [BITS.PED_REQ, BITS.RESTART, BITS.LT_CALL], timers: 14, palette: ['NO', 'NC', 'COIL', 'TON'], branches: true,
-  hints: ['RESTART = (T6.DN and NOT LT_CALL) OR T13.DN. Use two rows.', 'LT_CALL = (LOOP_EB or LOOP_WB or LT_CALL) and NOT T13.DN. The last contact goes after the branch.', 'T11, T12, T13 = 4, 6, 7 s, running while T6.DN and LT_CALL.', 'Arrow green = T6.DN, LT_CALL, NOT T11.DN, NOT EMG.'],
+{ id: 'r8', group: 'Round', label: 'Round 8', title: 'Emergency preempt', kind: 'traffic', concept: CONCEPT.r8, startFrom: 'r7',
+  brief: 'A fire engine or ambulance is coming <b>along the main street</b>. When the EMG input turns on, the cross street must stop and the main street must stay or turn green until EMG drops. Cross green or yellow first goes <b>yellow for 2 s</b>, then red. The strobe flashes. A neat way to do it: hold the cycle timer at zero while preempted, because zero is main green with everything else red. Clock bits flash the strobe for free.',
+  goal: 'EMG on: cross street yellow 2 s then red, main street green, left arrow red, WALK off, strobe flashing. EMG off: strobe off and the cycle restarts at main green.',
+  inputs: [I.PED_BTN, I.EMG], outputs: [O.M_R, O.M_Y, O.M_G, O.C_R, O.C_Y, O.C_G, O.WALK, O.DONT, O.ARROW_R, O.ARROW_Y, O.ARROW_G, O.STROBE], bits: ['PED_REQ', 'PREEMPT'], bitsInfo: [BITS.PED_REQ, BITS.PREEMPT], clocks: ['CLK_FAST', 'CLK_1HZ'], timers: 4,
+  palette: P.concat(['LES', 'GEQ', 'LIM', 'OTL', 'OTU']), newParts: newParts('CLK'),
+  hints: ['T2 (2 s) on EMG is the clearance window.', 'PREEMPT bit = (EMG and M_G) OR (EMG and T2.DN). Then add NOT PREEMPT to the T1 rung. T1 stays at zero, so main stays green.', 'Cross green gets NOT EMG. Cross yellow gets a second row: EMG, NOT T2.DN, LIM T1 11 to 17. Add NOT EMG to WALK.', 'STROBE = EMG and CLK_FAST. No timers needed.'],
   scenarios: [
-    { name: 'No cars waiting', desc: 'Loops never trip, 42 s', duration: 42, checks: [win(0.4, 41, { ARROW_G: 0, ARROW_Y: 0 }, 'Arrow stays dark'), win(20.5, 27.5, { M_G: 1 }, 'Cycle 2 starts on time (no arrow delay)'), noConflict, oneMain, oneCross] },
-    { name: 'Eastbound car waits', desc: 'LOOP_EB on from 2 s to 3 s', duration: 45, events: hold('LOOP_EB', 2, 3),
-      checks: [win(0.4, 19.5, { ARROW_G: 0, ARROW_Y: 0 }, 'No arrow during the normal cycle'), win(20.5, 23.6, { ARROW_G: 1, ARROW_Y: 0, M_R: 1, C_R: 1 }, 'Arrow green 4 s with every other signal red'), win(24.5, 25.6, { ARROW_G: 0, ARROW_Y: 1 }, 'Arrow yellow for 2 s'),
-        win(26.5, 26.7, { ARROW_G: 0, ARROW_Y: 0 }, 'All dark during the clearance'), win(28, 44, { ARROW_G: 0, ARROW_Y: 0 }, 'Call is cleared. No second arrow.'), win(28, 34, { M_G: 1 }, 'Main green resumes'),
-        never(v => v.ARROW_G && (v.M_G || v.M_Y || v.C_G || v.C_Y), 'Arrow never overlaps a through green', 'the arrow was lit with a conflicting signal.'), oneMain, oneCross] },
-    { name: 'Westbound car, then an emergency', desc: 'LOOP_WB on from 12 s to 13 s, EMG on from 21 s to 30 s', duration: 36, events: [].concat(hold('LOOP_WB', 12, 13), hold('EMG', 21, 30)),
-      checks: [win(20.4, 20.8, { ARROW_G: 1 }, 'Arrow green begins'), win(21.5, 29.7, { ARROW_G: 0, ARROW_Y: 0, M_R: 1, C_R: 1 }, 'EMG kills the arrow'), blinks('STROBE', 22, 29.7, 8, 'Strobe flashes'), noConflict] }],
+    { name: 'Emergency during main green', desc: 'EMG on from 3 s to 15 s', duration: 30, events: hold('EMG', 3, 15),
+      checks: [win(M, 2.6, { M_G: 1, STROBE: 0 }, 'Normal operation before the call'), win(3.4, 14.7, { M_G: 1, M_R: 0, M_Y: 0, C_R: 1, C_G: 0, C_Y: 0, ARROW_R: 1 }, 'Main stays green and everything else stays red for the whole call'), blinks('STROBE', 3.4, 14.7, 12, 'Strobe flashes during the call'),
+        win(15.6, 22.4, { STROBE: 0, M_G: 1 }, 'After EMG drops the strobe is off and the cycle restarts at main green'), noConflict, oneMain, oneCross, oneArrow] },
+    { name: 'Emergency during cross green', desc: 'Pedestrian waiting, EMG on from 13 s to 24 s', duration: 36, events: [].concat(press('PED_BTN', 2, 0.5), hold('EMG', 13, 24)),
+      checks: [win(13.4, 14.7, { C_G: 0, C_Y: 1, M_R: 1 }, 'Cross green drops to yellow right away'), win(15.6, 23.7, { M_G: 1, C_R: 1, C_G: 0, C_Y: 0, WALK: 0, DONT: 1, ARROW_R: 1 }, 'Then cross is red, main is green, no WALK'), blinks('STROBE', 15.6, 23.7, 12, 'Strobe flashes'),
+        win(24.6, 31.4, { STROBE: 0, M_G: 1 }, 'After release the strobe is off and main is green'), walkOnlyGreen, noConflict, oneMain, oneCross, oneWalk] },
+    { name: 'Emergency just before main yellow', desc: 'EMG on from 7 s to 16 s', duration: 26, events: hold('EMG', 7, 16),
+      checks: [win(7.4, 15.7, { M_G: 1, M_Y: 0, M_R: 0, C_R: 1 }, 'Main stays green. It must not flash to yellow when the call arrives late in the green.'), noConflict, oneMain, oneCross] },
+    { name: 'Emergency during main yellow', desc: 'EMG on from 9 s to 20 s', duration: 30, events: hold('EMG', 9, 20),
+      checks: [win(12.5, 19.7, { M_G: 1, C_R: 1, C_G: 0, C_Y: 0 }, 'Main reaches green and cross stays red'), noConflict, oneMain, oneCross] },
+    { name: 'Emergency during the left arrow', desc: 'EMG on from 21 s to 30 s', duration: 40, events: hold('EMG', 21, 30),
+      checks: [win(23.6, 29.7, { M_G: 1, ARROW_R: 1, ARROW_G: 0, ARROW_Y: 0, C_R: 1 }, 'Arrow goes red and main goes green'), noArrowConflict, noConflict, oneMain, oneCross, oneArrow] },
+    { name: 'Normal cycle still works', desc: 'No EMG, 30 s', duration: 30, checks: [].concat(mainWin(0, 27), crossWin(0, 27), arrowWin(0), [noConflict, oneMain, oneCross, oneArrow]) }],
   solution: SOL.r8 }
 ];
 
-function hasEl(p, t) { return p.some(r => r.rows.concat([r.tail]).some(w => w.some(e => e.t === t)) || (r.out && r.out.t === t)); }
-function hasTag(p, t, tag) { return p.some(r => r.rows.concat([r.tail]).some(w => w.some(e => e.t === t && e.tag === tag)) || (r.out && r.out.t === t && r.out.tag === tag)); }
+
+function hasEl(p, t) { return p.some(r => r.rows.concat([r.tail]).some(w => w.some(e => e.t === t)) || allOuts(r).some(o => o.t === t)); }
+function hasTag(p, t, tag) { return p.some(r => r.rows.concat([r.tail]).some(w => w.some(e => e.t === t && e.tag === tag)) || allOuts(r).some(o => o.t === t && o.tag === tag)); }
 /* ---------- Scene: intersection / bench renderer ---------- */
 const Scene = (() => {
   const W = 480, H = 480;
@@ -571,52 +721,73 @@ const Scene = (() => {
     }
     return col;
   }
+  /* Cars follow polyline paths (straight runs plus a sampled curve for left turns). s = distance travelled along the path. */
+  function mkPath(segs) {
+    const pts = [];
+    segs.forEach(sg => {
+      if (sg[0] === 'L') { if (!pts.length) pts.push([sg[1], sg[2]]); pts.push([sg[3], sg[4]]); }
+      else { const [, x0, y0, cx, cy, x1, y1] = sg; if (!pts.length) pts.push([x0, y0]); for (let i = 1; i <= 16; i++) { const t = i / 16, u = 1 - t; pts.push([u * u * x0 + 2 * u * t * cx + t * t * x1, u * u * y0 + 2 * u * t * cy + t * t * y1]); } }
+    });
+    const cum = [0]; for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+    return { pts, cum, total: cum[cum.length - 1] };
+  }
+  function at(p, s) {
+    const c = p.cum; s = Math.max(0, Math.min(p.total, s)); let i = 1; while (i < c.length - 1 && c[i] < s) i++;
+    const f = (s - c[i - 1]) / ((c[i] - c[i - 1]) || 1), a = p.pts[i - 1], b = p.pts[i];
+    return { x: a[0] + (b[0] - a[0]) * f, y: a[1] + (b[1] - a[1]) * f, a: Math.atan2(b[1] - a[1], b[0] - a[0]) };
+  }
+  // stop = path distance at which the car's centre sits behind the stop line
   const DIRS = {
-    EB: { ax: 'x', fix: 285, dir: 1, start: -20, stop: 156, sig: 'M' },
-    WB: { ax: 'x', fix: 195, dir: -1, start: 500, stop: 359, sig: 'M' },
-    SB: { ax: 'y', fix: 210, dir: 1, start: -20, stop: 156, sig: 'C' },
-    NB: { ax: 'y', fix: 270, dir: -1, start: 500, stop: 324, sig: 'C' }
+    EB: { path: mkPath([['L', -20, 285, 500, 285]]), stop: 176, sig: 'M' },
+    WB: { path: mkPath([['L', 500, 195, -20, 195]]), stop: 141, sig: 'M' },
+    SB: { path: mkPath([['L', 210, -20, 210, 500]]), stop: 176, sig: 'C' },
+    NB: { path: mkPath([['L', 270, 500, 270, -20]]), stop: 176, sig: 'C' },
+    EL: { path: mkPath([['L', -20, 255, 215, 255], ['Q', 215, 255, 270, 255, 270, 200], ['L', 270, 200, 270, -20]]), stop: 176, sig: 'A' },
+    WL: { path: mkPath([['L', 500, 225, 265, 225], ['Q', 265, 225, 210, 225, 210, 280], ['L', 210, 280, 210, 500]]), stop: 141, sig: 'A' }
   };
   let cars, peds, pedWait, spawnT, prevEmg, prevPed, tNow;
   const CARCOL = ['#7C8FA6', '#B9856B', '#6E9B8B', '#A7A2C4', '#C9B27A', '#8A8F98'];
-  function reset() { cars = { EB: [], WB: [], SB: [], NB: [] }; peds = []; pedWait = false; spawnT = { EB: 1, WB: 2.5, SB: 1.5, NB: 3 }; prevEmg = false; prevPed = false; tNow = 0; }
+  function reset() { cars = { EB: [], WB: [], SB: [], NB: [], EL: [], WL: [] }; peds = []; pedWait = false; spawnT = { EB: 1, WB: 2.5, SB: 1.5, NB: 3, EL: 4, WL: 6 }; prevEmg = false; prevPed = false; tNow = 0; }
   reset();
+  const has = (lv, t) => lv.outputs.some(o => o.tag === t);
 
-  function sigState(d, tags) {
-    const p = d.sig; const r = tags[p + '_R'], y = tags[p + '_Y'], g = tags[p + '_G'];
-    return r ? 'R' : y ? 'Y' : 'G';
-  }
-  function step(dt, tags, level) {
+  function step(dt, tags, lv) {
     tNow += dt;
-    if (level.kind !== 'traffic') return;
-    const hasCross = level.outputs.some(o => o.tag === 'C_R');
-    const emgClear = tags.EMG && tags.M_R && tags.C_R;
-    if (tags.EMG && !prevEmg) { const k = Math.random() < 0.5 ? 'EB' : 'SB'; cars[hasCross ? k : 'EB'].push({ pos: DIRS[k].start, amb: true, col: '#E5E9EC' }); }
+    if (lv.kind !== 'traffic') return;
+    const hasCross = has(lv, 'C_R'), hasArrow = has(lv, 'ARROW_R');
+    // an emergency vehicle appears on the main street when EMG turns on. It obeys the lights like everyone else, just faster.
+    if (tags.EMG && !prevEmg) cars[Math.random() < 0.5 ? 'EB' : 'WB'].push({ s: 0, amb: true, col: '#E9EDEF', v: 40 });
     prevEmg = !!tags.EMG;
     if (tags.PED_BTN && !prevPed) pedWait = true;
     prevPed = !!tags.PED_BTN;
-    if (pedWait && tags.WALK) { peds.push({ y: 172 }); pedWait = false; }
-    peds.forEach(p => p.y += 30 * dt); peds = peds.filter(p => p.y < 312);
+    if (pedWait && tags.WALK) { peds.push({ y: 180 }); pedWait = false; }
+    peds.forEach(p => p.y += 30 * dt); peds = peds.filter(p => p.y < 306);
     for (const k in DIRS) {
-      const d = DIRS[k];
-      if (d.sig === 'C' && !hasCross) continue;
+      const d = DIRS[k], L = cars[k];
+      if ((d.sig === 'C' && !hasCross) || (d.sig === 'A' && !hasArrow)) continue;
       spawnT[k] -= dt;
-      if (spawnT[k] <= 0) { spawnT[k] = 2.2 + Math.random() * 3.2; const L = cars[k]; const last = L.length ? L[L.length - 1] : null; if (!last || Math.abs(last.pos - d.start) > 36) L.push({ pos: d.start, col: CARCOL[(Math.random() * CARCOL.length) | 0] }); }
-      const sig = sigState(d, tags);
-      const L = cars[k];
+      if (spawnT[k] <= 0) {
+        spawnT[k] = (d.sig === 'A' ? 5 : 2.2) + Math.random() * 3.2;
+        const last = L.length ? L[L.length - 1] : null;
+        if (!last || last.s > 36) L.push({ s: 0, col: CARCOL[(Math.random() * CARCOL.length) | 0] });
+      }
+      // Only a RED lamp stops traffic. Green, yellow, or a dark (flashing) lamp means go.
+      const red = d.sig === 'M' ? tags.M_R : d.sig === 'C' ? tags.C_R : tags.ARROW_R;
       for (let i = 0; i < L.length; i++) {
         const c = L[i], lead = i > 0 ? L[i - 1] : null;
-        const dist = d.dir > 0 ? d.stop - c.pos : c.pos - d.stop;
+        const vmax = c.amb ? 95 : 52, brake = c.amb ? 130 : 85, accel = c.amb ? 110 : 60;
+        if (c.v === undefined) c.v = vmax;
+        const dist = d.stop - c.s, brakeD = c.v * c.v / (2 * brake);
         let room = 1e9;
-        if (c.amb) { if (dist > 0 && !emgClear) room = Math.max(0, dist - 2); }
-        else {
-          if (dist > 0) { if (sig === 'R' || (sig === 'Y' && dist > 22)) room = dist; }
-          if (lead && !lead.amb) room = Math.min(room, Math.max(0, d.dir * (lead.pos - c.pos) - 30));
-        }
-        const sp = (c.amb ? 90 : 52) * dt;
-        c.pos += d.dir * Math.min(sp, room);
+        // Decide once, when the lamp turns red: stop if there is room to brake, otherwise carry on through (too close to stop).
+        if (!red) c.halt = undefined; else if (c.halt === undefined && dist > -0.01) c.halt = dist >= brakeD - 3;
+        if (red && c.halt && dist > -0.01) room = Math.max(0, dist);   // at the line (dist = 0) it waits there
+        if (lead) room = Math.min(room, Math.max(0, lead.s - c.s - 30));
+        const target = Math.min(vmax, Math.sqrt(2 * brake * Math.max(0, room - 1)));
+        c.v = c.v < target ? Math.min(target, c.v + accel * dt) : Math.max(target, c.v - brake * dt);
+        c.s += Math.min(c.v * dt, room);
       }
-      cars[k] = L.filter(c => c.pos > -40 && c.pos < 520);
+      cars[k] = L.filter(c => c.s < d.path.total + 30);
     }
   }
 
@@ -626,95 +797,98 @@ const Scene = (() => {
     ctx.fill(); ctx.shadowBlur = 0; ctx.globalAlpha = 1;
   }
   function head(ctx, c, x, y, pre, tags, lv) {
-    const wired = lv.outputs.some(o => o.tag === pre + '_R'), a = wired ? 1 : 0.35;
+    const wired = has(lv, pre + '_R'), a = wired ? 1 : 0.35;
     ctx.globalAlpha = a; ctx.fillStyle = c.housing; ctx.beginPath(); ctx.roundRect(x, y, 16, 44, 4); ctx.fill(); ctx.globalAlpha = 1;
     lamp(ctx, c, x + 8, y + 9, tags[pre + '_R'], c.red, a); lamp(ctx, c, x + 8, y + 22, tags[pre + '_Y'], c.yellow, a); lamp(ctx, c, x + 8, y + 35, tags[pre + '_G'], c.green, a);
   }
-  function car(ctx, c, k, o) {
-    const d = DIRS[k]; const x = d.ax === 'x' ? o.pos : d.fix, y = d.ax === 'x' ? d.fix : o.pos;
-    ctx.save(); ctx.translate(x, y); if (d.ax === 'y') ctx.rotate(Math.PI / 2); if (d.dir < 0) ctx.rotate(Math.PI);
-    ctx.fillStyle = o.col; ctx.beginPath(); ctx.roundRect(-11, -6, 22, 12, 3); ctx.fill();
-    ctx.fillStyle = 'rgba(0,0,0,.28)'; ctx.fillRect(1, -4.5, 6, 9);
-    if (o.amb) { const on = Math.floor(tNow * 6) % 2; ctx.fillStyle = on ? c.red : c.blue; ctx.fillRect(-5, -6, 4, 12); ctx.shadowColor = on ? c.red : c.blue; ctx.shadowBlur = 10; ctx.fillRect(-5, -2, 4, 4); }
-    ctx.restore(); ctx.shadowBlur = 0;
-  }
-  function parked(ctx, c, x, y, dirX, color) { // car sitting on a loop
-    ctx.save(); ctx.translate(x, y); if (dirX < 0) ctx.rotate(Math.PI); ctx.fillStyle = color; ctx.beginPath(); ctx.roundRect(-11, -6, 22, 12, 3); ctx.fill(); ctx.fillStyle = 'rgba(0,0,0,.28)'; ctx.fillRect(1, -4.5, 6, 9); ctx.restore();
-  }
-  function loop(ctx, c, x, y, on) {
-    ctx.strokeStyle = on ? c.power : c.paint; ctx.lineWidth = 1.6; ctx.globalAlpha = on ? 1 : 0.6; ctx.strokeRect(x, y, 24, 18);
-    ctx.beginPath(); for (let i = 0; i < 5; i++) { ctx.moveTo(x + 4 + i * 4, y + (i % 2 ? 14 : 4)); ctx.lineTo(x + 8 + i * 4, y + (i % 2 ? 4 : 14)); } ctx.stroke(); ctx.globalAlpha = 1;
-  }
-  function arrowBox(ctx, c, x, y, g, yy, wired) {
-    ctx.globalAlpha = wired ? 1 : 0.35; ctx.fillStyle = c.housing; ctx.beginPath(); ctx.roundRect(x, y, 44, 22, 4); ctx.fill(); ctx.globalAlpha = 1;
-    [[x + 12, g, c.green], [x + 32, yy, c.yellow]].forEach(([cx, on, color]) => {
-      ctx.globalAlpha = wired ? 1 : 0.35; ctx.fillStyle = on ? color : c.off; if (on) { ctx.shadowColor = color; ctx.shadowBlur = 10; }
-      ctx.beginPath(); ctx.moveTo(cx + 6, y + 5); ctx.lineTo(cx - 6, y + 11); ctx.lineTo(cx + 6, y + 17); ctx.closePath(); ctx.fill(); ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+  function arrowHead(ctx, c, x, y, tags, mastFrom) {   // left-turn signal: red, yellow, green arrows on a mast arm
+    ctx.strokeStyle = c.housing; ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(mastFrom[0], mastFrom[1]); ctx.lineTo(x + 8, y + (mastFrom[1] < y ? 0 : 44)); ctx.stroke();
+    ctx.fillStyle = c.housing; ctx.beginPath(); ctx.roundRect(x, y, 16, 44, 4); ctx.fill();
+    [[tags.ARROW_R, c.red], [tags.ARROW_Y, c.yellow], [tags.ARROW_G, c.green]].forEach(([on, color], i) => {
+      const cx = x + 8, cy = y + 9 + i * 13;
+      ctx.fillStyle = on ? color : c.off; if (on) { ctx.shadowColor = color; ctx.shadowBlur = 10; }
+      ctx.beginPath(); ctx.moveTo(cx - 5.5, cy); ctx.lineTo(cx + 3, cy - 5.5); ctx.lineTo(cx + 3, cy - 2); ctx.lineTo(cx + 6, cy - 2); ctx.lineTo(cx + 6, cy + 2); ctx.lineTo(cx + 3, cy + 2); ctx.lineTo(cx + 3, cy + 5.5); ctx.closePath(); ctx.fill(); ctx.shadowBlur = 0;
     });
   }
-  function pedHead(ctx, c, x, y, tags, wired) {
-    ctx.globalAlpha = wired ? 1 : 0.35; ctx.fillStyle = c.housing; ctx.beginPath(); ctx.roundRect(x, y, 22, 22, 4); ctx.fill(); ctx.globalAlpha = 1;
+  function pedHead(ctx, c, x, y, tags) {
+    ctx.fillStyle = c.housing; ctx.beginPath(); ctx.roundRect(x, y, 22, 22, 4); ctx.fill();
     const w = tags.WALK, d = tags.DONT;
-    ctx.globalAlpha = wired ? 1 : 0.35;
     ctx.fillStyle = w ? c.white : c.off; if (w) { ctx.shadowColor = c.white; ctx.shadowBlur = 8; } ctx.fillRect(x + 3, y + 3, 7, 16); ctx.shadowBlur = 0;
-    ctx.fillStyle = d ? c.red : c.off; if (d) { ctx.shadowColor = c.red; ctx.shadowBlur = 8; } ctx.fillRect(x + 12, y + 3, 7, 16); ctx.shadowBlur = 0; ctx.globalAlpha = 1;
+    ctx.fillStyle = d ? c.red : c.off; if (d) { ctx.shadowColor = c.red; ctx.shadowBlur = 8; } ctx.fillRect(x + 12, y + 3, 7, 16); ctx.shadowBlur = 0;
   }
-  const has = (lv, t) => lv.outputs.some(o => o.tag === t);
+  function drawCar(ctx, c, k, o) {
+    const p = at(DIRS[k].path, o.s);
+    ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.a);
+    ctx.fillStyle = o.col; ctx.beginPath(); ctx.roundRect(-11, -6, 22, 12, 3); ctx.fill();
+    ctx.fillStyle = 'rgba(0,0,0,.28)'; ctx.fillRect(1, -4.5, 6, 9);
+    if (k === 'EL' || k === 'WL') { if (Math.floor(tNow * 3) % 2 === 0) { ctx.fillStyle = c.yellow; ctx.fillRect(8, -7.5, 3, 2.5); ctx.fillRect(-11, -7.5, 3, 2.5); } }   // left turn signal
+    if (o.amb) { const on = Math.floor(tNow * 6) % 2; ctx.fillStyle = on ? c.red : c.blue; ctx.shadowColor = on ? c.red : c.blue; ctx.shadowBlur = 10; ctx.fillRect(-5, -6, 4, 12); }
+    ctx.restore(); ctx.shadowBlur = 0;
+  }
+  /* Left-turn pocket in the California style: solid white lane line along the pocket, a broken line on the approach,
+     and a bent left-turn arrow on the pavement. Local frame: +x is the direction of travel, the stop line is at x = 0, the through lane is at +y. */
+  function pocket(ctx, c, sx, yc, dir, ext) {
+    ctx.save(); ctx.translate(sx, yc); if (dir < 0) ctx.rotate(Math.PI);
+    ctx.strokeStyle = c.paint; ctx.fillStyle = c.paint; ctx.lineWidth = 2.4; ctx.globalAlpha = .95;
+    ctx.beginPath(); ctx.moveTo(-95, 15); ctx.lineTo(0, 15); ctx.stroke();
+    ctx.setLineDash([10, 8]); ctx.globalAlpha = .7; ctx.beginPath(); ctx.moveTo(-ext, 15); ctx.lineTo(-95, 15); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha = .95;
+    ctx.lineWidth = 3.6; ctx.lineJoin = 'miter'; ctx.beginPath(); ctx.moveTo(-78, 6); ctx.lineTo(-56, 6); ctx.lineTo(-56, -4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-56, -14); ctx.lineTo(-63, -3); ctx.lineTo(-49, -3); ctx.closePath(); ctx.fill();
+    ctx.restore(); ctx.globalAlpha = 1;
+  }
 
   function drawTraffic(ctx, c, tags, lv) {
+    const arrows = has(lv, 'ARROW_R');
     ctx.fillStyle = c.ground; ctx.fillRect(0, 0, W, H);
     ctx.fillStyle = c.asphalt; ctx.fillRect(0, 180, W, 120); ctx.fillRect(180, 0, 120, H);
     ctx.strokeStyle = c.paint; ctx.lineWidth = 1.4; ctx.setLineDash([10, 9]); ctx.globalAlpha = .55;
-    [[0, 210, 180, 210], [300, 210, 480, 210], [0, 270, 180, 270], [300, 270, 480, 270], [210, 0, 210, 180], [210, 300, 210, 480], [270, 0, 270, 180], [270, 300, 270, 480]].forEach(l => { ctx.beginPath(); ctx.moveTo(l[0], l[1]); ctx.lineTo(l[2], l[3]); ctx.stroke(); });
+    const dashes = [[210, 0, 210, 180], [210, 300, 210, 480], [270, 0, 270, 180], [270, 300, 270, 480]];
+    if (!arrows) dashes.push([0, 210, 180, 210], [300, 210, 480, 210], [0, 270, 180, 270], [300, 270, 480, 270]);
+    dashes.forEach(l => { ctx.beginPath(); ctx.moveTo(l[0], l[1]); ctx.lineTo(l[2], l[3]); ctx.stroke(); });
     ctx.setLineDash([]); ctx.globalAlpha = .9; ctx.strokeStyle = c.yellow; ctx.lineWidth = 1.6;
-    [[0, 238.5, 180, 238.5], [0, 241.5, 180, 241.5], [300, 238.5, 480, 238.5], [300, 241.5, 480, 241.5], [208.5 + 0, 0, 208.5, 0]].slice(0, 4).forEach(l => { ctx.beginPath(); ctx.moveTo(l[0], l[1]); ctx.lineTo(l[2], l[3]); ctx.stroke(); });
-    [[238.5, 0, 238.5, 180], [241.5, 0, 241.5, 180], [238.5, 300, 238.5, 480], [241.5, 300, 241.5, 480]].forEach(l => { ctx.beginPath(); ctx.moveTo(l[0], l[1]); ctx.lineTo(l[2], l[3]); ctx.stroke(); });
+    [[0, 238.5, 180, 238.5], [0, 241.5, 180, 241.5], [300, 238.5, 480, 238.5], [300, 241.5, 480, 241.5], [238.5, 0, 238.5, 180], [241.5, 0, 241.5, 180], [238.5, 300, 238.5, 480], [241.5, 300, 241.5, 480]].forEach(l => { ctx.beginPath(); ctx.moveTo(l[0], l[1]); ctx.lineTo(l[2], l[3]); ctx.stroke(); });
     ctx.globalAlpha = 1;
-    // stop lines
+    if (arrows) { pocket(ctx, c, 170, 255, 1, 190); pocket(ctx, c, 345, 225, -1, 130); }
     ctx.strokeStyle = c.paint; ctx.lineWidth = 3;
     [[170, 240, 170, 300], [345, 180, 345, 240], [180, 170, 240, 170], [240, 310, 300, 310]].forEach(l => { ctx.beginPath(); ctx.moveTo(l[0], l[1]); ctx.lineTo(l[2], l[3]); ctx.stroke(); });
-    // crosswalk
     const cw = has(lv, 'WALK');
     ctx.globalAlpha = cw ? .85 : .3; ctx.fillStyle = c.paint;
     for (let y = 184; y < 298; y += 12) ctx.fillRect(312, y, 30, 6);
     ctx.globalAlpha = 1;
-    // strobe halo
     if (tags.STROBE) { ctx.fillStyle = 'rgba(77,163,255,.20)'; ctx.beginPath(); ctx.arc(240, 240, 215, 0, 7); ctx.fill(); }
-    // loops and cars
-    if (has(lv, 'ARROW_G')) {
-      loop(ctx, c, 120, 243, tags.LOOP_EB); loop(ctx, c, 372, 213, tags.LOOP_WB);
-      if (tags.LOOP_EB) parked(ctx, c, 132, 255, 1, '#9AA7B5'); if (tags.LOOP_WB) parked(ctx, c, 384, 225, -1, '#C79F7A');
-      ctx.fillStyle = c.ink2; ctx.font = '10px IBM Plex Mono, monospace'; ctx.fillText('LOOP', 122, 276); ctx.fillText('LOOP', 374, 208);
-      arrowBox(ctx, c, 70, 244, tags.ARROW_G, tags.ARROW_Y, true); arrowBox(ctx, c, 420, 214, tags.ARROW_G, tags.ARROW_Y, true);
-    }
-    for (const k in cars) cars[k].forEach(o => car(ctx, c, k, o));
+    for (const k in cars) cars[k].forEach(o => drawCar(ctx, c, k, o));
     peds.forEach(p => { ctx.fillStyle = c.yellow; ctx.beginPath(); ctx.arc(327, p.y, 4, 0, 7); ctx.fill(); });
-    if (pedWait) { ctx.fillStyle = c.yellow; ctx.beginPath(); ctx.arc(327, 168, 4, 0, 7); ctx.fill(); }
-    // heads
+    if (pedWait) { ctx.fillStyle = c.yellow; ctx.beginPath(); ctx.arc(327, 178, 4, 0, 7); ctx.fill(); }
     head(ctx, c, 152, 306, 'M', tags, lv); head(ctx, c, 358, 132, 'M', tags, lv);
     head(ctx, c, 160, 118, 'C', tags, lv); head(ctx, c, 306, 318, 'C', tags, lv);
-    if (cw) { pedHead(ctx, c, 346, 308, tags, true); pedHead(ctx, c, 346, 150, tags, true); }
+    if (cw) { pedHead(ctx, c, 322, 148, tags); pedHead(ctx, c, 328, 306, tags); }
+    if (arrows) { arrowHead(ctx, c, 116, 196, tags, [124, 180]); arrowHead(ctx, c, 348, 240, tags, [356, 300]); }
     if (has(lv, 'STROBE')) [[150, 112], [358, 112], [150, 362], [358, 362]].forEach(([x, y], i) => {
       const on = tags.STROBE && Math.floor(tNow * 10 + i) % 2 === 0; ctx.fillStyle = on ? c.blue : c.off; if (on) { ctx.shadowColor = c.blue; ctx.shadowBlur = 16; }
       ctx.beginPath(); ctx.arc(x, y, 5, 0, 7); ctx.fill(); ctx.shadowBlur = 0; });
     ctx.fillStyle = c.ink2; ctx.font = '600 11px IBM Plex Sans Condensed, sans-serif';
     ctx.fillText('MAIN STREET', 14, 172); ctx.save(); ctx.translate(310, 28); ctx.rotate(Math.PI / 2); ctx.fillText('CROSS STREET', 0, 0); ctx.restore();
-    if ((tags.M_G || tags.M_Y) && (tags.C_G || tags.C_Y)) { ctx.fillStyle = c.bad; ctx.font = '700 16px IBM Plex Sans Condensed, sans-serif'; ctx.textAlign = 'center'; ctx.fillText('CONFLICT: both streets are open', 240, 28); ctx.textAlign = 'left'; }
+    const bad = ((tags.M_G || tags.M_Y) && (tags.C_G || tags.C_Y)) ? 'both streets are open' : (tags.ARROW_G && (tags.M_G || tags.M_Y || tags.C_G || tags.C_Y)) ? 'arrow green with a street open' : '';
+    if (bad) { ctx.fillStyle = c.bad; ctx.font = '700 16px IBM Plex Sans Condensed, sans-serif'; ctx.textAlign = 'center'; ctx.fillText('CONFLICT: ' + bad, 240, 28); ctx.textAlign = 'left'; }
   }
 
   function drawBench(ctx, c, tags, lv, timers) {
     ctx.fillStyle = c.ground; ctx.fillRect(0, 0, W, H);
-    const out = lv.outputs[0], on = !!tags[out.tag], color = c[out.color];
-    const cx = 240, cy = 210;
-    ctx.fillStyle = c.asphalt; ctx.beginPath(); ctx.roundRect(60, 60, 360, 300, 14); ctx.fill();
-    if (on) { const g = ctx.createRadialGradient(cx, cy, 10, cx, cy, 150); g.addColorStop(0, color + 'cc'); g.addColorStop(1, color + '00'); ctx.fillStyle = g; ctx.fillRect(60, 60, 360, 300); }
-    ctx.fillStyle = c.housing; ctx.beginPath(); ctx.arc(cx, cy, 62, 0, 7); ctx.fill();
-    ctx.fillStyle = on ? color : c.off; if (on) { ctx.shadowColor = color; ctx.shadowBlur = 36; }
-    ctx.beginPath(); ctx.arc(cx, cy, 50, 0, 7); ctx.fill(); ctx.shadowBlur = 0;
-    if (out.tag === 'BEACON' && on) { ctx.save(); ctx.translate(cx, cy); ctx.rotate(tNow * 5); ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, 48, -0.3, 0.3); ctx.fill(); ctx.restore(); }
-    ctx.fillStyle = c.paint; ctx.font = '600 14px IBM Plex Sans Condensed, sans-serif'; ctx.textAlign = 'center'; ctx.fillText(out.label.toUpperCase() + '  ·  ' + (on ? 'ON' : 'OFF'), cx, 304);
+    ctx.fillStyle = c.asphalt; ctx.beginPath(); ctx.roundRect(40, 60, 400, 300, 14); ctx.fill();
+    const outs = lv.outputs, n = outs.length, xs = n === 1 ? [240] : [140, 340], R = n === 1 ? 62 : 52, cy = 195;
+    outs.forEach((out, i) => {
+      const on = !!tags[out.tag], color = c[out.color], cx = xs[i];
+      if (on) { const g = ctx.createRadialGradient(cx, cy, 10, cx, cy, R * 2.3); g.addColorStop(0, color + 'cc'); g.addColorStop(1, color + '00'); ctx.fillStyle = g; ctx.fillRect(cx - R * 2.3, cy - R * 2.3, R * 4.6, R * 4.6); }
+      ctx.fillStyle = c.housing; ctx.beginPath(); ctx.arc(cx, cy, R, 0, 7); ctx.fill();
+      ctx.fillStyle = on ? color : c.off; if (on) { ctx.shadowColor = color; ctx.shadowBlur = 34; }
+      ctx.beginPath(); ctx.arc(cx, cy, R - 12, 0, 7); ctx.fill(); ctx.shadowBlur = 0;
+      if (out.tag === 'BEACON' && on) { ctx.save(); ctx.translate(cx, cy); ctx.rotate(tNow * 5); ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, R - 14, -0.3, 0.3); ctx.fill(); ctx.restore(); }
+      if (out.tag === 'HORN' && on) { ctx.strokeStyle = c.paint; ctx.lineWidth = 3; for (let k = 0; k < 3; k++) { ctx.globalAlpha = .9 - k * .25 - ((tNow * 3) % 1) * .2; ctx.beginPath(); ctx.arc(cx, cy, R - 4 + 10 + k * 11 + ((tNow * 20) % 11), -0.9, 0.9); ctx.stroke(); } ctx.globalAlpha = 1; }
+      ctx.fillStyle = c.paint; ctx.font = '600 13px IBM Plex Sans Condensed, sans-serif'; ctx.textAlign = 'center';
+      ctx.fillText(out.label.toUpperCase() + '  ·  ' + (on ? 'ON' : 'OFF'), cx, cy + R + 26);
+    });
     const t = timers && timers.T1;
-    if (lv.timers) { const f = t && t.pre ? t.acc / t.pre : 0; ctx.fillStyle = c.off; ctx.fillRect(110, 326, 260, 10); ctx.fillStyle = c.power; ctx.fillRect(110, 326, 260 * f, 10); ctx.fillStyle = c.paint; ctx.font = '11px IBM Plex Mono, monospace'; ctx.fillText(t ? `T1  ${(t.acc / 10).toFixed(1)} / ${(t.pre / 10).toFixed(1)} s` + (t.dn ? '  DN' : '') : 'T1  not in program', cx, 354); }
+    if (lv.timers) { const f = t && t.pre ? t.acc / t.pre : 0; ctx.fillStyle = c.off; ctx.fillRect(110, 326, 260, 10); ctx.fillStyle = c.power; ctx.fillRect(110, 326, 260 * f, 10); ctx.fillStyle = c.paint; ctx.font = '11px IBM Plex Mono, monospace'; ctx.textAlign = 'center'; ctx.fillText(t ? `T1  ${(t.acc / 10).toFixed(1)} / ${(t.pre / 10).toFixed(1)} s` + (t.dn ? '  DN' : '') : 'T1  not in program', 240, 354); }
     ctx.textAlign = 'left';
   }
 
@@ -725,112 +899,133 @@ const Scene = (() => {
     ctx.setTransform(canvas.width / W, 0, 0, canvas.width / H, 0, 0);
     if (lv.kind === 'bench') drawBench(ctx, c, tags, lv, timers); else drawTraffic(ctx, c, tags, lv);
   }
-  return { step, draw, reset };
+  return { step, draw, reset, _cars: () => cars, _dirs: DIRS };
 })();
 /* ---------- UI state ---------- */
 const $ = s => document.querySelector(s);
 const LS = { get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }, set(k, v) { try { localStorage.setItem(k, v); } catch (e) { } } };
 let level, prog, sel = null, undoStack = [], results = null, stale = false, solConfirm = false, done = {};
-try { done = JSON.parse(LS.get('rbr.done') || '{}') || {}; } catch (e) { done = {}; }
+try { done = JSON.parse(LS.get('rbr3.done') || '{}') || {}; } catch (e) { done = {}; }
 let sim, inputs = {}, playing = true, speed = 1, accT = 0, scopeBuf = [], cellNodes = [], wireNodes = [], LABEL = {};
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-const allowBranch = () => level.id !== 't1';
+const allowBranch = () => !level.noBranch;
+const allowOutBranch = () => !level.noOutBranch;
 
 const SYM = {
   NO: '<svg viewBox="0 0 40 32"><path d="M12 4v24M28 4v24"/></svg>',
   NC: '<svg viewBox="0 0 40 32"><path d="M12 4v24M28 4v24M7 27L33 5"/></svg>',
   COIL: '<svg viewBox="0 0 40 32"><path d="M15 3Q5 16 15 29M25 3Q35 16 25 29"/></svg>',
-  TON: '<svg viewBox="0 0 40 32"><rect x="1" y="2" width="38" height="28" rx="3"/><text x="20" y="21" text-anchor="middle">TON</text></svg>'
+  TON: '<svg viewBox="0 0 40 32"><rect x="1" y="2" width="38" height="28" rx="3"/><text x="20" y="21" text-anchor="middle">TON</text></svg>',
+  LES: '<svg viewBox="0 0 40 32"><rect x="1" y="2" width="38" height="28" rx="3"/><text x="20" y="21" text-anchor="middle">LES</text></svg>',
+  GEQ: '<svg viewBox="0 0 40 32"><rect x="1" y="2" width="38" height="28" rx="3"/><text x="20" y="21" text-anchor="middle">GEQ</text></svg>',
+  LIM: '<svg viewBox="0 0 40 32"><rect x="1" y="2" width="38" height="28" rx="3"/><text x="20" y="21" text-anchor="middle">LIM</text></svg>',
+  OTL: '<svg viewBox="0 0 40 32"><path d="M15 3Q5 16 15 29M25 3Q35 16 25 29"/><text x="20" y="21" text-anchor="middle">L</text></svg>',
+  OTU: '<svg viewBox="0 0 40 32"><path d="M15 3Q5 16 15 29M25 3Q35 16 25 29"/><text x="20" y="21" text-anchor="middle">U</text></svg>'
 };
-const KIND = { NO: 'Normally open contact', NC: 'Normally closed contact', COIL: 'Output coil', TON: 'Timer on-delay' };
+const CMP = ['LES', 'GEQ', 'LIM'], isCmp = t => CMP.includes(t), isCoilish = t => t === 'COIL' || t === 'OTL' || t === 'OTU';
+const KIND = { NO: 'Normally open contact', NC: 'Normally closed contact', COIL: 'Output coil', TON: 'Timer on-delay', LES: 'Timer value less than', GEQ: 'Timer value at least', LIM: 'Timer value in range', OTL: 'Latch coil', OTU: 'Unlatch coil' };
+const fmt = v => (v / 10).toFixed(1) + ' s';
 
 function tagSets() {
-  return { inputs: level.inputs.map(i => i.tag), outputs: level.outputs.map(o => o.tag), bits: level.bits, timers: Array.from({ length: level.timers }, (_, i) => 'T' + (i + 1)) };
+  return { inputs: level.inputs.map(i => i.tag), outputs: level.outputs.map(o => o.tag), bits: level.bits, timers: Array.from({ length: level.timers }, (_, i) => 'T' + (i + 1)), clocks: level.clocks || [] };
 }
 function optionsFor(kind, cur) {
   const s = tagSets(); const o = t => `<option value="${t}"${t === cur ? ' selected' : ''}>${esc(t)}${LABEL[t] && LABEL[t] !== t ? '  –  ' + esc(LABEL[t]) : ''}</option>`;
   const g = (name, list) => list.length ? `<optgroup label="${name}">${list.map(o).join('')}</optgroup>` : '';
   let h = cur ? '' : '<option value="" selected>choose a tag</option>';
-  if (kind === 'TON') return h + g('Timers', s.timers);
+  if (kind === 'TON' || kind === 'CMP') return h + g('Timers', s.timers);
   if (kind === 'COIL') return h + g('Outputs', s.outputs) + g('Memory bits', s.bits);
-  return h + g('Inputs', s.inputs) + g('Outputs', s.outputs) + g('Memory bits', s.bits) + g('Timer done bits', s.timers.map(t => t + '.DN'));
+  return h + g('Inputs', s.inputs) + g('System clocks', s.clocks) + g('Outputs', s.outputs) + g('Memory bits', s.bits) + g('Timer done bits', s.timers.map(t => t + '.DN'));
 }
 
 /* ---------- program editing ---------- */
 const snap = () => JSON.stringify(prog.rungs);
 function pushUndo() { undoStack.push(snap()); if (undoStack.length > 60) undoStack.shift(); }
 function normalize() {
-  prog.rungs.forEach(r => { if (r.rows.length === 1 && r.tail.length) { r.rows[0] = r.rows[0].concat(r.tail); r.tail = []; } });
+  prog.rungs.forEach(r => { if (!r.more) r.more = []; if (r.rows.length === 1 && r.tail.length) { r.rows[0] = r.rows[0].concat(r.tail); r.tail = []; } });
   if (!prog.rungs.length) prog.rungs.push(emptyRung());
 }
 function mutate(fn) { pushUndo(); fn(); normalize(); afterEdit(); }
 function afterEdit() {
-  LS.set('rbr.prog.' + level.id, snap());
+  LS.set('rbr3.prog.' + level.id, snap());
   if (results) stale = true;
   solConfirm = false;
   rebuildSim(); renderLadder(); renderInsp(); renderTagList(); renderResults(); updateCoach(true);
 }
 function getSel() {
   if (!sel) return null; const r = prog.rungs[sel.r]; if (!r) return null;
-  return sel.sec === 'row' ? r.rows[sel.row] && r.rows[sel.row][sel.i] : sel.sec === 'tail' ? r.tail[sel.i] : r.out;
+  return sel.sec === 'row' ? r.rows[sel.row] && r.rows[sel.row][sel.i] : sel.sec === 'tail' ? r.tail[sel.i] : sel.sec === 'more' ? (r.more || [])[sel.row] : r.out;
 }
 function defaultEl(type, r) {
   const s = tagSets();
   if (type === 'NO' || type === 'NC') return { t: type, tag: s.inputs[0] || s.outputs[0] || (s.timers[0] ? s.timers[0] + '.DN' : '') };
-  if (type === 'TON') { const used = prog.rungs.filter(x => x.out && x.out.t === 'TON').map(x => x.out.tag); const t = s.timers.find(x => !used.includes(x)) || s.timers[0]; return { t, tag: t, preset: 20 }; }
-  const used = prog.rungs.filter(x => x.out && x.out.t === 'COIL').map(x => x.out.tag);
+  if (isCmp(type)) return type === 'LIM' ? { t: 'LIM', tag: s.timers[0] || '', lo: 0, hi: 20 } : { t: type, tag: s.timers[0] || '', val: 20 };
+  if (type === 'TON') { const used = prog.rungs.flatMap(allOuts).filter(o => o.t === 'TON').map(o => o.tag); const t = s.timers.find(x => !used.includes(x)) || s.timers[0]; return { t: 'TON', tag: t, preset: 20 }; }
+  const used = prog.rungs.flatMap(allOuts).filter(o => o.t === 'COIL').map(o => o.tag);
+  if (type === 'OTL' || type === 'OTU') return { t: type, tag: s.bits[0] || s.outputs[0] || '' };
   return { t: 'COIL', tag: s.outputs.find(x => !used.includes(x)) || s.bits.find(x => !used.includes(x)) || s.outputs[0] || '' };
 }
 function addEl(pos, type) {
   mutate(() => {
-    const r = prog.rungs[pos.r]; let el = defaultEl(type); if (type === 'TON') el.t = 'TON';
+    const r = prog.rungs[pos.r]; let el = defaultEl(type);
     if (pos.sec === 'row') { r.rows[pos.row].push(el); sel = { r: pos.r, sec: 'row', row: pos.row, i: r.rows[pos.row].length - 1 }; }
     else if (pos.sec === 'tail') { r.tail.push(el); sel = { r: pos.r, sec: 'tail', i: r.tail.length - 1 }; }
+    else if (pos.sec === 'more') { r.more[pos.row] = el; sel = { r: pos.r, sec: 'more', row: pos.row, i: 0 }; }
     else { r.out = el; sel = { r: pos.r, sec: 'out' }; }
   });
 }
 function delSel() {
   if (!sel) return; const s = sel;
-  mutate(() => { const r = prog.rungs[s.r]; if (s.sec === 'row') r.rows[s.row].splice(s.i, 1); else if (s.sec === 'tail') r.tail.splice(s.i, 1); else r.out = null; sel = null; });
+  mutate(() => { const r = prog.rungs[s.r]; if (s.sec === 'row') r.rows[s.row].splice(s.i, 1); else if (s.sec === 'tail') r.tail.splice(s.i, 1); else if (s.sec === 'more') r.more.splice(s.row, 1); else r.out = null; sel = null; });
 }
 function warnings() {
   const w = [], seen = {}, tm = {};
-  prog.rungs.forEach((r, i) => { if (r.out && r.out.tag) { const k = r.out.t === 'TON' ? tm : seen; k[r.out.tag] = (k[r.out.tag] || 0) + 1; } if (!r.out && (r.rows.some(x => x.length) || r.tail.length)) w.push(`Rung ${i + 1} has no output yet.`); });
+  prog.rungs.forEach((r, i) => { allOuts(r).forEach(o => { if (o.tag && o.t !== 'OTL' && o.t !== 'OTU') { const k = o.t === 'TON' ? tm : seen; k[o.tag] = (k[o.tag] || 0) + 1; } }); if (!r.out && (r.rows.some(x => x.length) || r.tail.length)) w.push(`Rung ${i + 1} has no output yet.`); });
   Object.keys(seen).forEach(k => seen[k] > 1 && w.push(`${k} is written by ${seen[k]} coils. Only the last one in the ladder wins.`));
   Object.keys(tm).forEach(k => tm[k] > 1 && w.push(`Timer ${k} is used in ${tm[k]} rungs. Give each timer its own rung and tag.`));
-  const blank = prog.rungs.some(r => r.rows.concat([r.tail, r.out ? [r.out] : []]).some(x => x.some(e => !e.tag)));
+  const blank = prog.rungs.some(r => r.rows.concat([r.tail, allOuts(r)]).some(x => x.some(e => !e.tag)));
   if (blank) w.push('Some elements have no tag. Select them and choose one.');
   return w;
 }
 
 /* ---------- ladder rendering ---------- */
-function cellHTML(el, k) {
-  const sub = el.t === 'TON' ? `<span class="sub">${(el.preset / 10).toFixed(1)} s</span>` : el.t === 'COIL' ? '' : '';
-  const selc = sel && getSel() === el ? ' sel' : '';
-  return `<button class="cell${el.t === 'TON' ? ' box' : ''}${selc}${el.tag ? '' : ' bad'}" data-k="${k}" aria-label="${KIND[el.t]} ${esc(el.tag || 'no tag')}">${SYM[el.t]}<span class="tg2">${esc(el.tag || '?')}</span>${sub}</button>`;
+function cellHTML(el, k, edit) {
+  if (edit === undefined) edit = true;
+  const sub = el.t === 'TON' ? `<span class="sub">${fmt(el.preset)}</span>` : el.t === 'LES' ? `<span class="sub">&lt; ${fmt(el.val)}</span>` : el.t === 'GEQ' ? `<span class="sub">\u2265 ${fmt(el.val)}</span>` : el.t === 'LIM' ? `<span class="sub">${(el.lo / 10).toFixed(1)}\u2013${fmt(el.hi)}</span>` : '';
+  const label = isCmp(el.t) ? (el.tag ? el.tag + '.ACC' : '') : el.tag;
+  const selc = edit && sel && getSel() === el ? ' sel' : '';
+  if (!edit) return `<span class="cell${el.t === 'TON' || isCmp(el.t) ? ' box' : ''}">${SYM[el.t]}<span class="tg2">${esc(label || '?')}</span>${sub}</span>`;
+  return `<button class="cell${el.t === 'TON' || isCmp(el.t) ? ' box' : ''}${selc}${el.tag ? '' : ' bad'}" data-k="${k}" aria-label="${KIND[el.t]} ${esc(el.tag || 'no tag')}">${SYM[el.t]}<span class="tg2">${esc(label || '?')}</span>${sub}</button>`;
 }
 function addHTML(r, sec, row) {
   return `<span class="addw"><button class="add" data-a="add" data-r="${r}" data-sec="${sec}" data-row="${row || 0}" aria-label="Add element">+</button></span>`;
 }
+function rungHTML(r, ri, edit) {
+  const more = r.more || [], multi = r.rows.length > 1;
+  const cell = (el, k) => cellHTML(el, k, edit), add = (a, s, w) => edit ? addHTML(a, s, w) : '';
+  const slot = j => edit ? `<span class="addw"><button class="add" data-a="add" data-r="${ri}" data-sec="${j < 0 ? 'out' : 'more'}" data-row="${j < 0 ? 0 : j}" aria-label="Add output" title="Add output">+</button></span>` : '<span class="addw"></span>';
+  let rows = '';
+  r.rows.forEach((row, j) => {
+    rows += `<div class="row">` + row.map((el, i) => cell(el, `${ri}|row|${j}|${i}`)).join('') + add(ri, 'row', j) +
+      (multi ? `<span class="wire" data-wk="${ri}|w|${j}"></span>` + (edit && j > 0 ? `<button class="xrow" data-a="rowdel" data-r="${ri}" data-row="${j}" title="Remove this branch">\u00D7</button>` : '') : '') + `</div>`;
+  });
+  const tail = multi ? r.tail.map((el, i) => cell(el, `${ri}|tail|0|${i}`)).join('') + add(ri, 'tail', 0) : '';
+  const outs = `<div class="outs${more.length ? ' multi' : ''}"><div class="orow">${r.out ? cell(r.out, `${ri}|out|0|0`) : slot(-1)}</div>` +
+    more.map((o, j) => `<div class="orow">${o ? cell(o, `${ri}|more|${j}|0`) : slot(j)}${edit ? `<button class="xrow" data-a="moredel" data-r="${ri}" data-row="${j}" title="Remove this output branch">\u00D7</button>` : ''}</div>`).join('') + `</div>`;
+  return `<div class="rung"><span class="rail on"></span><div class="rb"><div class="grp${multi ? ' multi' : ''}">${rows}</div>${tail}<span class="wire" data-wk="${ri}|fill"></span>${outs}</div><span class="rail" data-wk="${ri}|rail"></span></div>`;
+}
+function miniLadder(rungs) { return `<div class="mini" aria-hidden="true">` + rungs.map((r, i) => `<div class="rungWrap">${rungHTML(r, 900 + i, false)}</div>`).join('') + `</div>`; }
 function renderLadder() {
   const L = $('#ladder'); let h = '';
   prog.rungs.forEach((r, ri) => {
-    const multi = r.rows.length > 1;
-    let rows = '';
-    r.rows.forEach((row, j) => {
-      rows += `<div class="row">` + row.map((el, i) => cellHTML(el, `${ri}|row|${j}|${i}`)).join('') + addHTML(ri, 'row', j) +
-        (multi ? `<span class="wire" data-wk="${ri}|w|${j}"></span>` + (j > 0 ? `<button class="xrow" data-a="rowdel" data-r="${ri}" data-row="${j}" title="Remove this branch">×</button>` : '') : '') + `</div>`;
-    });
-    const tail = multi ? r.tail.map((el, i) => cellHTML(el, `${ri}|tail|0|${i}`)).join('') + addHTML(ri, 'tail', 0) : '';
-    const out = r.out ? cellHTML(r.out, `${ri}|out|0|0`) : `<span class="addw"><button class="add" data-a="add" data-r="${ri}" data-sec="out" data-row="0" aria-label="Add output" title="Add output">+</button></span>`;
     h += `<div class="rungWrap"><div class="rungHead"><span class="sp">Rung ${ri + 1}</span>` +
-      (allowBranch() ? `<button class="btn" data-a="branch" data-r="${ri}" title="Add a parallel row (OR)">⑂ Branch</button>` : '') +
-      `<button class="btn" data-a="up" data-r="${ri}" ${ri === 0 ? 'disabled' : ''} aria-label="Move rung up">↑</button><button class="btn" data-a="down" data-r="${ri}" ${ri === prog.rungs.length - 1 ? 'disabled' : ''} aria-label="Move rung down">↓</button>` +
-      `<button class="btn" data-a="dup" data-r="${ri}" title="Copy this rung below, then change its tags">Duplicate</button><button class="btn" data-a="rungdel" data-r="${ri}" aria-label="Delete rung">Delete</button></div>` +
-      `<div class="rung"><span class="rail on"></span><div class="rb"><div class="grp${multi ? ' multi' : ''}" data-gk="${ri}">${rows}</div>${tail}<span class="wire" data-wk="${ri}|fill"></span>${out}</div><span class="rail" data-wk="${ri}|rail"></span></div></div>`;
+      (allowBranch() ? `<button class="btn" data-a="branch" data-r="${ri}" title="Add a parallel row of contacts (OR)">\u2442 Branch</button>` : '') +
+      (allowOutBranch() ? `<button class="btn" data-a="outbranch" data-r="${ri}" title="Add another output to this rung">\u2442 Output</button>` : '') +
+      `<button class="btn" data-a="up" data-r="${ri}" ${ri === 0 ? 'disabled' : ''} aria-label="Move rung up">\u2191</button><button class="btn" data-a="down" data-r="${ri}" ${ri === prog.rungs.length - 1 ? 'disabled' : ''} aria-label="Move rung down">\u2193</button>` +
+      `<button class="btn" data-a="dup" data-r="${ri}" title="Copy this rung below, then change its tags">Duplicate</button><button class="btn" data-a="rungdel" data-r="${ri}" aria-label="Delete rung">Delete</button></div>` + rungHTML(r, ri, true) + `</div>`;
   });
   const w = warnings();
-  h += w.length ? `<div class="stale">⚠ ${w.map(esc).join('<br>⚠ ')}</div>` : '';
+  h += w.length ? `<div class="stale">\u26A0 ${w.map(esc).join('<br>\u26A0 ')}</div>` : '';
   L.innerHTML = h;
   cellNodes = [...L.querySelectorAll('[data-k]')].map(n => { const [r, sec, row, i] = n.dataset.k.split('|'); return { n, r: +r, sec, row: +row, i: +i }; });
   wireNodes = [...L.querySelectorAll('[data-wk]')].map(n => { const [r, t, j] = n.dataset.wk.split('|'); return { n, r: +r, t, j: +j }; });
@@ -861,7 +1056,11 @@ function renderInsp() {
   if (!el) { I.innerHTML = '<span class="hint">Press <b>+</b> in a rung to add a part, then click the part to set its tag.</span>'; return; }
   let h = `<b>${KIND[el.t]}</b>`;
   if (el.t === 'NO' || el.t === 'NC') h += `<span class="seg"><button data-a="settype" data-v="NO" aria-pressed="${el.t === 'NO'}">NO —| |—</button><button data-a="settype" data-v="NC" aria-pressed="${el.t === 'NC'}">NC —|/|—</button></span>`;
-  h += `<label>Tag <select id="selTag" data-a="tag">${optionsFor(el.t === 'NO' || el.t === 'NC' ? 'C' : el.t, el.tag)}</select></label>`;
+  h += `<label>${isCmp(el.t) ? 'Timer' : 'Tag'} <select id="selTag" data-a="tag">${optionsFor(el.t === 'NO' || el.t === 'NC' ? 'C' : isCmp(el.t) ? 'CMP' : el.t === 'OTL' || el.t === 'OTU' ? 'COIL' : el.t, el.tag)}</select></label>`;
+  const num = (id, a, v) => `<input id="${id}" data-a="${a}" type="number" min="0" max="120" step="0.1" value="${(v / 10).toFixed(1)}" style="width:76px"> s`;
+  if (el.t === 'LES') h += `<label>true while .ACC is below ${num('selVal', 'val', el.val)}</label>`;
+  if (el.t === 'GEQ') h += `<label>true once .ACC reaches ${num('selVal', 'val', el.val)}</label>`;
+  if (el.t === 'LIM') h += `<label>true from ${num('selLo', 'lo', el.lo)} up to ${num('selHi', 'hi', el.hi)}</label>`;
   if (el.t === 'TON') h += `<label>Preset <input id="selPre" data-a="pre" type="number" min="0" max="120" step="0.1" value="${(el.preset / 10).toFixed(1)}" style="width:80px"> s</label>`;
   h += `<button class="btn sm" data-a="delel" style="margin-left:auto">Delete part</button>`;
   I.innerHTML = h;
@@ -871,8 +1070,8 @@ function closeMenu() { if (menuEl) { menuEl.remove(); menuEl = null; } }
 function openMenu(btn) {
   closeMenu();
   const pos = { r: +btn.dataset.r, sec: btn.dataset.sec, row: +btn.dataset.row };
-  const items = pos.sec === 'out' ? ['COIL', 'TON'] : ['NO', 'NC'];
-  const desc = { NO: 'Passes power when its tag is ON', NC: 'Passes power when its tag is OFF', COIL: 'Turns its tag ON when powered', TON: 'Delays: .DN turns on after the preset' };
+  const items = pos.sec === 'out' || pos.sec === 'more' ? ['COIL', 'TON', 'OTL', 'OTU'] : ['NO', 'NC', 'LES', 'GEQ', 'LIM'];
+  const desc = { NO: 'Passes power when its tag is ON', NC: 'Passes power when its tag is OFF', COIL: 'Tag is ON while powered', TON: 'Delays: .DN turns on after the preset', LES: 'Timer value below a number', GEQ: 'Timer value at or above a number', LIM: 'Timer value between two numbers', OTL: 'Sets the tag ON and keeps it', OTU: 'Sets the tag OFF' };
   menuEl = document.createElement('div'); menuEl.className = 'menu'; menuEl.style.position = 'fixed';
   menuEl.innerHTML = items.filter(t => level.palette.includes(t)).map(t => `<button data-t="${t}">${KIND[t]}<small>${desc[t]}</small></button>`).join('') || '<button disabled>Not available in this round</button>';
   document.body.appendChild(menuEl);
@@ -888,8 +1087,10 @@ function wireEditor() {
       const r = +a.dataset.r, act = a.dataset.a;
       if (act === 'add') { e.stopPropagation(); openMenu(a); return; }
       if (act === 'branch') mutate(() => prog.rungs[r].rows.push([]));
+      else if (act === 'outbranch') mutate(() => { prog.rungs[r].more.push(null); });
+      else if (act === 'moredel') mutate(() => { prog.rungs[r].more.splice(+a.dataset.row, 1); sel = null; });
       else if (act === 'rowdel') mutate(() => { prog.rungs[r].rows.splice(+a.dataset.row, 1); sel = null; });
-      else if (act === 'dup') mutate(() => { const cp = clone(prog.rungs[r]); if (cp.out && cp.out.t === 'TON') { const s = tagSets(), used = prog.rungs.filter(x => x.out && x.out.t === 'TON').map(x => x.out.tag), nt = s.timers.find(t => !used.includes(t)); if (nt) cp.out.tag = nt; } prog.rungs.splice(r + 1, 0, cp); sel = null; });
+      else if (act === 'dup') mutate(() => { const cp = clone(prog.rungs[r]); allOuts(cp).forEach(o => { if (o.t === 'TON') { const s = tagSets(), used = prog.rungs.flatMap(allOuts).filter(x => x.t === 'TON').map(x => x.tag), nt = s.timers.find(t => !used.includes(t)); if (nt) o.tag = nt; } }); prog.rungs.splice(r + 1, 0, cp); sel = null; });
       else if (act === 'rungdel') mutate(() => { prog.rungs.splice(r, 1); sel = null; });
       else if (act === 'up') mutate(() => { const x = prog.rungs.splice(r, 1)[0]; prog.rungs.splice(r - 1, 0, x); sel = null; });
       else if (act === 'down') mutate(() => { const x = prog.rungs.splice(r, 1)[0]; prog.rungs.splice(r + 1, 0, x); sel = null; });
@@ -905,6 +1106,7 @@ function wireEditor() {
   $('#insp').addEventListener('change', e => {
     const el = getSel(); if (!el) return;
     if (e.target.dataset.a === 'tag') mutate(() => { el.tag = e.target.value; });
+    else if (['val', 'lo', 'hi'].includes(e.target.dataset.a)) mutate(() => { el[e.target.dataset.a] = Math.max(0, Math.min(1200, Math.round(parseFloat(e.target.value || '0') * 10))); });
     else if (e.target.dataset.a === 'pre') mutate(() => { el.preset = Math.max(0, Math.min(1200, Math.round(parseFloat(e.target.value || '0') * 10))); });
   });
   document.addEventListener('click', e => { if (menuEl && !menuEl.contains(e.target)) closeMenu(); });
@@ -944,9 +1146,9 @@ function renderInputs() {
   });
 }
 function renderTagList() {
-  const s = tagSets(), used = prog.rungs.filter(r => r.out && r.out.t === 'TON').map(r => r.out.tag);
+  const s = tagSets(), used = prog.rungs.flatMap(allOuts).filter(o => o.t === 'TON').map(o => o.tag);
   const row = (t, kind) => `<div class="tg" data-tg="${t}" data-kind="${kind}"><i></i><span title="${esc(LABEL[t] || t)}">${t}</span>${kind === 'T' ? '<em></em>' : ''}</div>`;
-  $('#tags').innerHTML = s.inputs.map(t => row(t, 'I')).join('') + s.outputs.map(t => row(t, 'O')).join('') + s.bits.map(t => row(t, 'B')).join('') + used.sort((a, b) => a.slice(1) - b.slice(1)).map(t => row(t, 'T')).join('');
+  $('#tags').innerHTML = s.inputs.map(t => row(t, 'I')).join('') + s.outputs.map(t => row(t, 'O')).join('') + s.bits.map(t => row(t, 'B')).join('') + s.clocks.map(t => row(t, 'K')).join('') + used.sort((a, b) => a.slice(1) - b.slice(1)).map(t => row(t, 'T')).join('');
 }
 function updateTagList() {
   document.querySelectorAll('#tags .tg').forEach(n => {
@@ -989,12 +1191,21 @@ function frame(ts) {
 }
 
 /* ---------- mission card, coach, results ---------- */
+function conceptHTML(L, big) {
+  const c = L.concept; if (!c) return '';
+  return `<div class="concept${c.recap ? ' recap' : ''}"><small>${c.recap ? 'Concept in use' : 'Concept'}</small><h4>${esc(c.title)}</h4><p>${c.body}</p><div class="formula">${esc(c.expr)}</div>${miniLadder(c.example)}</div>`;
+}
 function renderMission() {
   const i = LEVELS.indexOf(level), prev = level.startFrom ? LEVELS.find(l => l.id === level.startFrom) : null;
-  let h = `<div class="kicker">${level.label} · Step ${i + 1} of ${LEVELS.length}</div><h3>${esc(level.title)}</h3><p>${level.brief}</p><div class="goal"><small>Goal</small>${level.goal}</div>`;
+  let h = `<div class="kicker">${level.label} \u00B7 Step ${i + 1} of ${LEVELS.length}</div><h3>${esc(level.title)}</h3><p>${level.brief}</p>`;
+  h += conceptHTML(level);
+  h += `<div class="goal"><small>Goal</small>${level.goal}</div>`;
+  if (level.newParts && !level.concept) h += `<div class="newparts"><small>New parts unlocked</small><ul>${level.newParts.map(p => `<li>${esc(p.text)}</li>`).join('')}</ul></div>`;
   if (level.coach) h += `<ul class="coach" id="coach">${level.coach.map((c, k) => `<li data-c="${k}"><i></i><span>${c.text}</span></li>`).join('')}</ul>`;
   if (prev) h += `<p class="stale" style="margin:10px 0 0">Your ladder from ${esc(prev.label)} carries over. Extend it.</p>`;
   h += `<details class="hints"><summary>Need a hint?</summary><ul>${level.hints.map(x => `<li>${x}</li>`).join('')}</ul></details>`;
+  const learned = LEVELS.slice(0, i).filter(l => l.concept && !l.concept.recap);
+  if (learned.length) h += `<details class="hints learned"><summary>Concepts so far (${learned.length})</summary>${learned.map(l => `<div class="lc"><b>${esc(l.concept.title)}</b><span class="formula">${esc(l.concept.expr)}</span>${miniLadder(l.concept.example)}<p>${l.concept.body}</p></div>`).join('')}</details>`;
   $('#cMission').innerHTML = h;
 }
 function updateCoach(force) {
@@ -1024,7 +1235,7 @@ function renderResults() {
 }
 function runChecks() {
   results = gradeLevel(prog, level); stale = false;
-  if (results.every(r => r.ok)) { done[level.id] = true; LS.set('rbr.done', JSON.stringify(done)); renderNav(); }
+  if (results.every(r => r.ok)) { done[level.id] = true; LS.set('rbr3.done', JSON.stringify(done)); renderNav(); }
   renderResults(); $('#cRes').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 function renderNav() {
@@ -1032,25 +1243,26 @@ function renderNav() {
   const cur = $('#levels [aria-current]'); if (cur && cur.scrollIntoView) { const L = $('#levels'); L.scrollLeft = cur.offsetLeft - 40; }
 }
 function renderLegend() {
-  const d = { NO: 'Normally open. Passes power when its tag is ON.', NC: 'Normally closed. Passes power when its tag is OFF.', COIL: 'Output coil. Sets its tag ON when it gets power.', TON: 'On-delay timer. Its .DN bit turns on after the preset.' };
-  $('#legend').innerHTML = level.palette.map(t => `<div>${SYM[t].replace('<svg', '<svg')}<span>${d[t]}</span></div>`).join('');
+  const d = { NO: 'Normally open. Passes power when its tag is ON.', NC: 'Normally closed. Passes power when its tag is OFF.', COIL: 'Output coil. Its tag is ON while it has power.', TON: 'On-delay timer. Its .DN bit turns on after the preset.', LES: 'Passes power while the timer\u2019s running value is below a number.', GEQ: 'Passes power once the timer\u2019s running value reaches a number.', LIM: 'Passes power while the timer\u2019s value is inside a window.', OTL: 'Latch coil. Turns its tag ON and keeps it on.', OTU: 'Unlatch coil. Turns its tag OFF.' };
+  const fresh = (level.newParts || []).map(p => p.id);
+  $('#legend').innerHTML = level.palette.map(t => `<div${fresh.includes(t) ? ' class="isnew"' : ''}>${SYM[t]}<span>${d[t]}</span></div>`).join('');
 }
 
 /* ---------- level loading ---------- */
 function openLevel(id, fromHash) {
   closeMenu();
   level = LEVELS.find(l => l.id === id) || LEVELS[0];
-  LABEL = {}; level.outputs.concat(level.inputs, level.bitsInfo || []).forEach(o => LABEL[o.tag] = o.label); TAGNAME = LABEL;
-  let saved = null; try { saved = JSON.parse(LS.get('rbr.prog.' + level.id)); } catch (e) { }
+  LABEL = {}; level.outputs.concat(level.inputs, level.bitsInfo || [], (level.clocks || []).map(c => CLOCKS[c])).forEach(o => LABEL[o.tag] = o.label); TAGNAME = LABEL;
+  let saved = null; try { saved = JSON.parse(LS.get('rbr3.prog.' + level.id)); } catch (e) { }
   if (!saved || !Array.isArray(saved) || !saved.length) {
-    if (level.startFrom) { try { saved = JSON.parse(LS.get('rbr.prog.' + level.startFrom)); } catch (e) { } if (!saved || !saved.length) saved = clone(SOL[level.startFrom]); }
+    if (level.startFrom) { try { saved = JSON.parse(LS.get('rbr3.prog.' + level.startFrom)); } catch (e) { } if (!saved || !saved.length) saved = clone(SOL[level.startFrom]); }
     else saved = [emptyRung()];
   }
   prog = { rungs: saved }; normalize();
   sel = null; undoStack = []; results = null; stale = false; solConfirm = false; inputs = {};
   scopeKeys = level.inputs.map(i => i.tag).concat(level.outputs.map(o => o.tag));
   Scene.reset(); rebuildSim();
-  LS.set('rbr.last', level.id);
+  LS.set('rbr3.last', level.id);
   if (!fromHash) { try { history.replaceState(null, '', '#' + level.id); } catch (e) { } }
   renderNav(); renderMission(); renderLegend(); renderInputs(); renderLadder(); renderInsp(); renderTagList(); renderResults(); updateCoach(true);
   window.scrollTo({ top: 0 });
@@ -1062,7 +1274,7 @@ function boot() {
   $('#bReset').onclick = () => { Scene.reset(); rebuildSim(); };
   document.querySelectorAll('.speed button').forEach(b => b.onclick = () => { speed = +b.dataset.s; document.querySelectorAll('.speed button').forEach(x => x.setAttribute('aria-pressed', x === b)); });
   addEventListener('hashchange', () => { showView(); const id = location.hash.slice(1); if (LEVELS.some(l => l.id === id) && id !== level.id) openLevel(id, true); });
-  const h = location.hash.slice(1), last = LS.get('rbr.last');
+  const h = location.hash.slice(1), last = LS.get('rbr3.last');
   openLevel(LEVELS.some(l => l.id === h) ? h : LEVELS.some(l => l.id === last) ? last : 't1', true);
   showView(); requestAnimationFrame(frame);
 }
@@ -1070,18 +1282,20 @@ boot();
 
 /* ---------- text export and reviewer sheet ---------- */
 function ladderText(rungs) {
-  const el = e => e.t === 'NO' ? `XIC ${e.tag || '?'}` : e.t === 'NC' ? `XIO ${e.tag || '?'}` : e.t === 'COIL' ? `OTE ${e.tag || '?'}` : `TON ${e.tag || '?'} preset ${(e.preset / 10).toFixed(1)}s`;
+  const f = x => (x / 10).toFixed(1) + 's';
+  const el = e => e.t === 'NO' ? `XIC ${e.tag || '?'}` : e.t === 'NC' ? `XIO ${e.tag || '?'}` : e.t === 'COIL' ? `OTE ${e.tag || '?'}` : e.t === 'OTL' ? `OTL ${e.tag || '?'}` : e.t === 'OTU' ? `OTU ${e.tag || '?'}` : e.t === 'LES' ? `LES ${e.tag}.ACC < ${f(e.val)}` : e.t === 'GEQ' ? `GEQ ${e.tag}.ACC >= ${f(e.val)}` : e.t === 'LIM' ? `LIM ${f(e.lo)} <= ${e.tag}.ACC < ${f(e.hi)}` : `TON ${e.tag || '?'} preset ${f(e.preset)}`;
   return rungs.map((r, i) => {
     const rows = r.rows.filter(x => x.length).map(x => x.map(el).join('  ->  '));
     let t = `Rung ${i + 1}:  `;
     if (rows.length > 1) t += '[ ' + rows.map(x => '( ' + x + ' )').join('  OR  ') + ' ]'; else t += rows[0] || '(always on)';
     if (r.tail.length) t += '  ->  ' + r.tail.map(el).join('  ->  ');
-    return t + '  ->  ' + (r.out ? el(r.out) : '(no output)');
+    const os = allOuts(r);
+    return t + '  ->  ' + (os.length > 1 ? '{ ' + os.map(el).join('  ,  ') + ' }' : os.length ? el(os[0]) : '(no output)');
   }).join('\n');
 }
 function shareText() {
   const sc = level.scenarios.map(s => `  - ${s.name}: ${s.desc || ''}`).join('\n');
-  return `Rung by Rung: ${level.label}, ${level.title}\nGoal: ${level.goal.replace(/<[^>]+>/g, '')}\nTests:\n${sc}\n\nMy ladder (XIC = normally open, XIO = normally closed, OTE = coil, TON = on-delay timer):\n${ladderText(prog.rungs)}\n\nLast result: ${results ? (results.every(r => r.ok) ? 'all checks pass' : results.flatMap(r => r.checks.filter(c => !c.ok).map(c => `${r.name} / ${c.label}: ${c.msg}`)).join('\n  ')) : 'tests not run yet'}`;
+  return `Rung by Rung: ${level.label}, ${level.title}\nGoal: ${level.goal.replace(/<[^>]+>/g, '')}\nTests:\n${sc}\n\nMy ladder (XIC = normally open, XIO = normally closed, OTE = coil, OTL/OTU = latch/unlatch, TON = on-delay timer, LES/GEQ/LIM = compare a timer\u2019s accumulator):\n${ladderText(prog.rungs)}\n\nLast result: ${results ? (results.every(r => r.ok) ? 'all checks pass' : results.flatMap(r => r.checks.filter(c => !c.ok).map(c => `${r.name} / ${c.label}: ${c.msg}`)).join('\n  ')) : 'tests not run yet'}`;
 }
 function renderShare() {
   const box = $('#shareBox'); if (!box) return;
@@ -1092,7 +1306,7 @@ function renderShare() {
 function renderReview() {
   const strip = h => h.replace(/<[^>]+>/g, '');
   let h = `<div class="rev"><div class="card"><h3>Reviewer sheet</h3><p>For anyone checking the course for technical accuracy. Every round lists its goal, its tests and the reference solution in standard ladder mnemonics. <a href="#t1" id="backGame">Back to the game</a></p>
-  <h5>How the simulator works</h5><ul><li>Scan cycle of 100 ms. Rungs run top to bottom, and a coil or timer written in a rung is visible to later rungs in the same scan.</li><li>Inputs are applied at the start of each scan. Outputs are just tags the ladder writes.</li><li>TON: accumulates one tick per scan while its rung is true, sets .DN when it reaches the preset, and resets to zero and clears .DN when the rung goes false.</li><li>A rung is a group of parallel rows (OR), each row a series of contacts (AND), then optional series contacts, then one output. A rung with no contacts is always true.</li><li>Simplifications: the STOP button reads true when pressed and is examined with an NC contact (real stop buttons are usually wired the other way for fail-safety). No retentive timers, latch/unlatch or counters.</li><li>A tested window starts and ends 0.3 to 0.4 s inside each phase, so one or two scans of timing drift are accepted.</li></ul></div>`;
+  <h5>How the simulator works</h5><ul><li>Scan cycle of 100 ms. Rungs run top to bottom, and a coil or timer written in a rung is visible to later rungs in the same scan.</li><li>Inputs are applied at the start of each scan. Outputs are just tags the ladder writes.</li><li>TON: accumulates one tick per scan while its rung is true, sets .DN when it reaches the preset, and resets to zero and clears .DN when the rung goes false.</li><li>A rung is a group of parallel rows (OR), each row a series of contacts (AND), then optional series contacts, then one output. A rung with no contacts is always true.</li><li>Simplifications: the STOP button reads true when pressed and is examined with an NC contact (real stop buttons are usually wired the other way for fail-safety). No retentive timers, counters or one-shots. System clock bits CLK_1HZ and CLK_FAST are provided by the sim.</li><li>A tested window starts and ends 0.3 to 0.4 s inside each phase, so one or two scans of timing drift are accepted.</li></ul></div>`;
   LEVELS.forEach(L => {
     h += `<div class="card"><div class="kicker">${esc(L.label)}</div><h3>${esc(L.title)}</h3><p>${strip(L.brief)}</p><div class="goal"><small>Goal</small>${strip(L.goal)}</div>
     <h5>Tags</h5><p class="stale">Inputs: ${L.inputs.map(i => `${i.tag} (${i.kind === 'push' ? 'momentary' : 'maintained'})`).join(', ') || 'none'}<br>Outputs: ${L.outputs.map(o => o.tag).join(', ')}${L.bits.length ? '<br>Memory bits: ' + L.bits.join(', ') : ''}</p>
@@ -1107,6 +1321,3 @@ function showView() {
   if (rv) { renderReview(); window.scrollTo({ top: 0 }); }
 }
 </script>
-
-</body>
-</html>
